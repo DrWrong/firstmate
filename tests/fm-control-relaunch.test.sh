@@ -471,6 +471,37 @@ test_secondmate_relaunch_refuses_an_unmarked_home() {
   pass "fm-control relaunch: a secondmate home that is not this secondmate's is refused"
 }
 
+test_concurrent_relaunch_is_refused() {
+  local dir out rc lock holder i
+  dir=$(new_case lock rl19)
+  add_ship_task "$dir" rl19 claude
+  lock="$dir/home/state/.control-rl19.lock"
+  # A live holder of this task's control lock, taken through the same lock
+  # library fm-control uses.
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    sleep 30
+  ) &
+  holder=$!
+  i=0
+  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$lock" ] || { kill "$holder" 2>/dev/null; fail "could not stage a held control lock"; }
+  out=$(run_control "$dir" rl19 relaunch --note "concurrent"); rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 1 "$rc" "a second concurrent control action should refuse"
+  assert_contains "$out" "another control action is already running" \
+    "the refusal should name the concurrent action"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a refused concurrent relaunch must not stop the agent"
+  pass "fm-control relaunch: two control actions on one task serialize instead of interleaving"
+}
+
 # --- 6. fm-spawn --relaunch's own refusals -----------------------------------
 
 test_spawn_relaunch_refuses_a_live_agent() {
@@ -540,6 +571,7 @@ test_launch_failure_restores_the_prior_record_and_reports_it
 test_journal_records_the_checkpoint_it_proved
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home
+test_concurrent_relaunch_is_refused
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
