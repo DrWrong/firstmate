@@ -45,10 +45,10 @@
 #              standing charter is never rewritten.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
-#              bin/fm-spawn.sh --relaunch. A failure before
-#              the new agent is running restores the prior durable record and
-#              reports the concrete state; it never leaves a half-transitioned
-#              task claiming to be running.
+#              bin/fm-spawn.sh --relaunch. A failure before publication keeps
+#              the prior durable record in place and reports the concrete
+#              state; it never leaves a half-transitioned task claiming to be
+#              running.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -514,8 +514,7 @@ relaunch_rollback() {
           echo "error: relaunch of $ID failed while stopping the old agent, which is still running; its original instructions were restored" >&2
           ;;
         dead)
-          [ ! -f "$META_PRIOR" ] || cp -p "$META_PRIOR" "$META" 2>/dev/null || true
-          journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-restored-agent-dead" || true
+          journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-agent-dead" || true
           echo "error: $ID's agent stopped but relaunch did not reach replacement launch; no agent is running, and its work plus progress note are preserved at $WT" >&2
           ;;
         *)
@@ -536,10 +535,7 @@ relaunch_rollback() {
         journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-record-kept" || true
         echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT" >&2
       else
-        if [ -f "$META_PRIOR" ]; then
-          cp -p "$META_PRIOR" "$META" 2>/dev/null || true
-        fi
-        journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-restored" || true
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
         echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
       fi
       ;;

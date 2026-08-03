@@ -482,6 +482,25 @@ spawn_herdr_presentation_order_lock_acquire() {
   return 1
 }
 
+clear_relaunch_harness_wiring() {
+  local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
+  token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
+  token=
+  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
+  fi
+  auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || return 1
+  if [ -n "$auth_path" ]; then
+    rm -f -- "$auth_path" || return 1
+  fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rm -f -- "$path" || return 1
+  done <<EOF
+$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
+EOF
+}
+
 spawn_herdr_presentation_order_lock_release() {
   [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ] || return 0
   HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -1639,7 +1658,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # files and turn-end token registry entries behind, and even a same-harness
   # relaunch would orphan the retired busy generation's token
   # (bin/fm-control-lib.sh owns where those artifacts live).
-  fm_control_clear_harness_wiring "$RELAUNCH_PRIOR_HARNESS" "$WT" "$STATE_REAL" "$ID" || true
+  clear_relaunch_harness_wiring "$RELAUNCH_PRIOR_HARNESS" "$WT" "$STATE_REAL" "$ID" || {
+    echo "error: could not retire $RELAUNCH_PRIOR_HARNESS wiring for task $ID; refusing to arm the replacement" >&2
+    exit 1
+  }
 fi
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every

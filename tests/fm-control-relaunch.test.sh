@@ -12,7 +12,7 @@
 #   3. The progress note is required where the replacement needs it, lands in
 #      the instructions the replacement reads, and never rewrites a charter.
 #   4. A refusal before the agent is stopped changes nothing.
-#   5. A launch failure after the agent is stopped restores the prior record,
+#   5. A launch failure after the agent is stopped keeps the prior record,
 #      reports the concrete state, and preserves the work.
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
@@ -86,7 +86,12 @@ case "${1:-}" in
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
-        *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
+        *pane_current_path*)
+          if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
+            : > "$FM_FAKE_CWD_RACE_READY"
+            /bin/sleep 1
+          fi
+          cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
     done
     printf 'fakepane\n'; exit 0 ;;
@@ -206,6 +211,19 @@ done
 exec "$FM_REAL_AWK" "$@"
 SH
   chmod +x "$1/fakebin/awk"
+}
+
+make_rm_failure_stub() {  # <case-dir>
+  cat > "$1/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ -n "${FM_FAKE_RM_FAIL_PATH:-}" ] && [ "$arg" = "$FM_FAKE_RM_FAIL_PATH" ]; then
+    exit 1
+  fi
+done
+exec "$FM_REAL_RM" "$@"
+SH
+  chmod +x "$1/fakebin/rm"
 }
 
 # --- 1. same-harness relaunch -----------------------------------------------
@@ -413,21 +431,47 @@ test_prior_harness_turnend_registry_entry_is_cleared() {
   pass "fm-control relaunch: the retired incarnation's global turn-end token is revoked"
 }
 
+test_wiring_removal_failure_refuses_before_replacement_arm() {
+  local dir hook out rc real_rm
+  dir=$(new_case wiring-failure rl29)
+  add_ship_task "$dir" rl29 claude
+  hook="$dir/wt/.claude/settings.local.json"
+  mkdir -p "${hook%/*}"
+  printf '{}\n' > "$hook"
+  real_rm=$(command -v rm)
+  make_rm_failure_stub "$dir"
+  out=$(FM_REAL_RM="$real_rm" FM_FAKE_RM_FAIL_PATH="$hook" \
+    run_control "$dir" rl29 relaunch --note "retry after wiring cleanup"); rc=$?
+  expect_code 1 "$rc" "an undeletable prior hook must fail closed"$'\n'"$out"
+  assert_contains "$out" "could not retire claude wiring" \
+    "the failure should identify prior wiring cleanup"
+  [ -e "$hook" ] || fail "the fixture should retain the undeletable prior hook"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+    "replacement launch must not be armed after wiring cleanup fails"
+  [ "$(journal_field "$dir" rl29 phase)" = failed:launching ] \
+    || fail "the transaction should record the partial launch failure"
+  [ "$(journal_field "$dir" rl29 rollback)" = prior-record-kept ] \
+    || fail "unpublished rollback should retain the live durable record"
+  pass "fm-control relaunch: wiring cleanup failure refuses replacement arming"
+}
+
 test_turnend_auth_paths_are_owned_by_the_control_adapter() {
-  local dir state grok_path kimi_path
+  local dir state grok_path kimi_path token_path
   dir=$(fm_test_tmproot fm-control-auth)
   state="$dir/state"
   mkdir -p "$state"
   printf 'fm.111111111111\n' > "$state/x.grok-turnend-token"
   printf 'fm.222222222222\n' > "$state/x.kimi-turnend-token"
-  grok_path=$(GROK_HOME="$dir/gh" fm_control_harness_turnend_auth_path grok "$state" x)
+  token_path=$(fm_control_harness_turnend_token_path grok "$state" x)
+  [ "$token_path" = "$state/x.grok-turnend-token" ] \
+    || fail "the grok token path should be computed without reading it"
+  grok_path=$(GROK_HOME="$dir/gh" fm_control_harness_turnend_auth_path grok fm.111111111111)
   [ "$grok_path" = "$dir/gh/hooks/fm-turn-end.d/fm.111111111111" ] \
     || fail "grok's registry path should resolve under GROK_HOME, got '$grok_path'"
-  kimi_path=$(HOME="$dir/kh" fm_control_harness_turnend_auth_path kimi "$state" x)
+  kimi_path=$(HOME="$dir/kh" fm_control_harness_turnend_auth_path kimi fm.222222222222)
   [ "$kimi_path" = "$dir/kh/.kimi-code/fm-turn-end.d/fm.222222222222" ] \
     || fail "kimi's registry path should resolve under the home store, got '$kimi_path'"
-  printf 'not a token/../..\n' > "$state/x.grok-turnend-token"
-  grok_path=$(GROK_HOME="$dir/gh" fm_control_harness_turnend_auth_path grok "$state" x)
+  grok_path=$(GROK_HOME="$dir/gh" fm_control_harness_turnend_auth_path grok 'not a token/../..')
   [ -z "$grok_path" ] || fail "a malformed token must resolve to no path, got '$grok_path'"
   pass "fm-control-lib: one owner resolves each harness's turn-end registry entry, and refuses a malformed token"
 }
@@ -638,7 +682,7 @@ test_checkpoint_refuses_uninspectable_head_and_status() {
 
 # --- 5. failure after the agent is stopped -----------------------------------
 
-test_launch_failure_restores_the_prior_record_and_reports_it() {
+test_launch_failure_keeps_the_prior_record_and_reports_it() {
   local dir out rc before
   dir=$(new_case rollback rl13)
   add_ship_task "$dir" rl13 claude
@@ -651,14 +695,47 @@ test_launch_failure_restores_the_prior_record_and_reports_it() {
   assert_contains "$out" "no agent is running" "the failure should say no agent is running"
   assert_contains "$out" "$dir/wt" "the failure should say where the work is preserved"
   [ "$(cat "$dir/home/state/rl13.meta")" = "$before" ] \
-    || fail "a failed launch must restore the prior durable record"
+    || fail "a failed launch must keep the prior durable record"
   [ "$(journal_field "$dir" rl13 phase)" = "failed:launching" ] \
     || fail "the journal should record the failed phase, got '$(journal_field "$dir" rl13 phase)'"
-  [ "$(journal_field "$dir" rl13 rollback)" = "prior-record-restored" ] \
+  [ "$(journal_field "$dir" rl13 rollback)" = "prior-record-kept" ] \
     || fail "the journal should record what the rollback did"
   assert_grep "carry this forward" "$dir/home/data/rl13/brief.md" \
     "the progress note must survive so a later recovery still has it"
-  pass "fm-control relaunch: a launch failure after the stop restores the prior record and reports the real state"
+  pass "fm-control relaunch: a launch failure after the stop keeps the prior record and reports the real state"
+}
+
+test_prepublication_failure_keeps_concurrent_durable_metadata() {
+  local dir control_pid link_out rc i=0
+  dir=$(new_case rollback-race rl30)
+  add_ship_task "$dir" rl30 claude
+  printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  FM_FAKE_CWD_RACE_READY="$dir/cwd-race-ready" \
+    run_control "$dir" rl30 relaunch --harness codex --note "preserve concurrent metadata" \
+      > "$dir/control.out" &
+  control_pid=$!
+  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 200 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$dir/cwd-race-ready" ] || {
+    kill "$control_pid" 2>/dev/null || true
+    wait "$control_pid" 2>/dev/null || true
+    fail "relaunch did not reach its pre-publication endpoint check"
+  }
+  link_out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$X_LINK" rl30 request-30 --carry-count 2 --carry-ts 1700000000 \
+      --carry-platform x --carry-max 280 2>&1); rc=$?
+  expect_code 0 "$rc" "concurrent durable metadata publication should succeed"$'\n'"$link_out"
+  wait "$control_pid"; rc=$?
+  expect_code 1 "$rc" "the staged pre-publication launch failure should fail closed"
+  [ "$(meta_field "$dir" rl30 x_request)" = request-30 ] \
+    || fail "rollback erased the concurrent X request"
+  [ "$(meta_field "$dir" rl30 x_followups)" = 2 ] \
+    || fail "rollback erased the concurrent follow-up count"
+  [ "$(journal_field "$dir" rl30 rollback)" = prior-record-kept ] \
+    || fail "pre-publication rollback should leave the live record untouched"
+  pass "fm-control relaunch: unpublished rollback keeps concurrent durable metadata"
 }
 
 test_post_publication_launch_failure_keeps_the_new_record() {
@@ -688,7 +765,7 @@ test_stop_transport_failure_reconciles_a_dead_agent() {
   [ "$(cat "$dir/fake/command")" = zsh ] || fail "the fixture should stop the old agent before reporting transport failure"
   [ "$(journal_field "$dir" rl25 phase)" = failed:stopping ] \
     || fail "the journal should retain the pre-stop phase on a partial stop"
-  [ "$(journal_field "$dir" rl25 rollback)" = prior-record-restored-agent-dead ] \
+  [ "$(journal_field "$dir" rl25 rollback)" = prior-record-kept-agent-dead ] \
     || fail "rollback should reconcile the observed dead agent"
   assert_contains "$out" "no agent is running" "the failure should report the reconciled dead state"
   assert_grep "preserve this after stop" "$dir/home/data/rl25/brief.md" \
@@ -957,6 +1034,7 @@ test_same_harness_relaunch_keeps_the_profile_axes
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
+test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
@@ -967,7 +1045,8 @@ test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
-test_launch_failure_restores_the_prior_record_and_reports_it
+test_launch_failure_keeps_the_prior_record_and_reports_it
+test_prepublication_failure_keeps_concurrent_durable_metadata
 test_post_publication_launch_failure_keeps_the_new_record
 test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase

@@ -12,9 +12,9 @@
 # verbs addressed to an exact task id, with the per-harness mechanics owned
 # here rather than improvised per harness in agent prose.
 #
-# This file owns three capability tables and nothing else. It has no side
-# effects, runs no backend command, and reads no state, so it can be sourced
-# by a test as a pure contract:
+# This file owns three capability tables plus their pure artifact-path tables
+# and nothing else. It has no side effects, runs no backend command, and reads
+# no state, so it can be sourced by a test as a pure contract:
 #
 #   1. Verb allowlist. There is no arbitrary-text and no generic raw-key entry
 #      point on the control plane; a caller either names an allowlisted verb or
@@ -150,34 +150,21 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
 # grok and kimi are the two adapters whose turn-end hook is global and gated by
 # a private token file; every other adapter's wiring is fully covered by
 # fm_control_harness_wiring_paths. Prints the registry path or nothing.
-fm_control_harness_turnend_auth_path() {  # <harness> <state-dir> <id>
-  local harness=${1-} state=${2-} id=${3-} token
+fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
+  local harness=${1-} state=${2-} id=${3-}
   [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
-    grok) token=$(cat "$state/$id.grok-turnend-token" 2>/dev/null || true) ;;
-    kimi) token=$(cat "$state/$id.kimi-turnend-token" 2>/dev/null || true) ;;
-    *) return 0 ;;
+    grok) printf '%s\n' "$state/$id.grok-turnend-token" ;;
+    kimi) printf '%s\n' "$state/$id.kimi-turnend-token" ;;
   esac
+}
+
+fm_control_harness_turnend_auth_path() {  # <harness> <token>
+  local harness=${1-} token=${2-}
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   case "$harness" in
     grok) printf '%s\n' "${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d/$token" ;;
     kimi) printf '%s\n' "$HOME/.kimi-code/fm-turn-end.d/$token" ;;
+    *) return 0 ;;
   esac
-}
-
-# Remove every per-task wiring artifact <harness> owns for <id>. Used by a
-# relaunch before the new incarnation is armed, and by teardown. Removal is
-# best-effort and idempotent: an absent artifact is already in the wanted
-# state, so this never fails a caller that is otherwise succeeding.
-fm_control_clear_harness_wiring() {  # <harness> <worktree> <state-dir> <id>
-  local harness=${1-} wt=${2-} state=${3-} id=${4-} path
-  [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    rm -f "$path" 2>/dev/null || true
-  done <<EOF
-$(fm_control_harness_turnend_auth_path "$harness" "$state" "$id")
-$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
-EOF
-  return 0
 }
