@@ -454,8 +454,7 @@ TARGET_EFFORT=
 journal_write() {  # <phase> [extra-line]...
   local phase=$1
   shift
-  RELAUNCH_PHASE=$phase
-  {
+  if {
     echo "v1"
     echo "task=$ID"
     echo "phase=$phase"
@@ -474,7 +473,11 @@ journal_write() {  # <phase> [extra-line]...
     for line in "$@"; do
       echo "$line"
     done
-  } > "$JOURNAL.tmp" && mv -f "$JOURNAL.tmp" "$JOURNAL"
+  } > "$JOURNAL.tmp" && mv -f "$JOURNAL.tmp" "$JOURNAL"; then
+    RELAUNCH_PHASE=$phase
+    return 0
+  fi
+  return 1
 }
 
 relaunch_rollback() {

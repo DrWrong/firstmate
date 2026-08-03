@@ -146,6 +146,7 @@ run_control() {  # <case-dir> <args...>
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
+    FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -174,6 +175,21 @@ esac
 exec "$FM_REAL_GIT" "$@"
 SH
   chmod +x "$1/fakebin/git"
+}
+
+make_mv_failure_stub() {  # <case-dir>
+  cat > "$1/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" ]; then
+  for path in "$@"; do
+    if [ -f "$path" ] && grep -Fqx 'phase=complete' "$path"; then
+      exit 1
+    fi
+  done
+fi
+exec "$FM_REAL_MV" "$@"
+SH
+  chmod +x "$1/fakebin/mv"
 }
 
 # --- 1. same-harness relaunch -----------------------------------------------
@@ -571,6 +587,25 @@ test_stop_transport_failure_reconciles_a_dead_agent() {
   pass "fm-control relaunch: partial stop reconciles actual agent state"
 }
 
+test_complete_journal_failure_rolls_back_from_durable_phase() {
+  local dir out rc real_mv
+  dir=$(new_case completejournal rl27)
+  add_ship_task "$dir" rl27 claude
+  printf 'codex' > "$dir/fake/becomes"
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL=1 \
+    run_control "$dir" rl27 relaunch --harness codex --note "keep durable phase honest"); rc=$?
+  expect_code 1 "$rc" "a failed complete journal replacement should fail closed"$'\n'"$out"
+  [ "$(journal_field "$dir" rl27 phase)" = failed:launching ] \
+    || fail "rollback should start from the last durable launching phase"
+  [ "$(journal_field "$dir" rl27 rollback)" = none-new-record-kept ] \
+    || fail "rollback should retain the published replacement record"
+  [ "$(meta_field "$dir" rl27 harness)" = codex ] \
+    || fail "journal failure must not rewrite the published replacement record"
+  pass "fm-control relaunch: failed journal replacement preserves durable phase"
+}
+
 test_journal_records_the_checkpoint_it_proved() {
   local dir head
   dir=$(new_case journal rl14)
@@ -823,6 +858,7 @@ test_checkpoint_refuses_uninspectable_head_and_status
 test_launch_failure_restores_the_prior_record_and_reports_it
 test_post_publication_launch_failure_keeps_the_new_record
 test_stop_transport_failure_reconciles_a_dead_agent
+test_complete_journal_failure_rolls_back_from_durable_phase
 test_journal_records_the_checkpoint_it_proved
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home
