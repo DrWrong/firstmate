@@ -46,6 +46,8 @@ VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi"
 #   literal  every `send-keys -l` payload, one per line - exactly what was
 #            typed into the composer.
 #   keys     every named key send, one per line.
+#   pane     optional capture-pane override, for an adapter whose busy verdict
+#            is read from the rendered tail.
 # Two transitions make it a lifecycle model rather than a recorder: a literal
 # that is the harness's exit command flips `command` to a shell (the agent
 # stopped), and a literal carrying a launch brief flips it to the value in
@@ -92,7 +94,9 @@ case "${1:-}" in
       esac
     done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  capture-pane)
+    if [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
+    exit 0 ;;
   list-windows)
     if [ -f "$D/windows" ]; then cat "$D/windows"; fi
     exit 0 ;;
@@ -152,7 +156,7 @@ add_task() {
 run_control() {
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    FM_CONTROL_POLL=0.01 FM_CONTROL_INTERRUPT_WAIT=0.05 \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 \
     FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     "$CONTROL" "$@" 2>&1
 }
@@ -520,6 +524,35 @@ test_agent_that_does_not_stop_fails_closed() {
   pass "fm-control exit: an agent that ignores its exit command fails closed instead of claiming success"
 }
 
+test_interrupt_that_does_not_settle_fails_closed() {
+  local dir out rc
+  dir=$(new_case nosettle)
+  add_task "$dir" t1 grok
+  alive_as "$dir" grok
+  # Grok has no semantic busy writer yet, so its verdict comes from the
+  # rendered cancel hint. A footer that never clears means the cancel did not
+  # take, and the control plane must say so instead of reporting a landed
+  # interrupt.
+  printf '╭────╮\n│    │\n╰────╯\n Ctrl+c:cancel\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 1 "$rc" "an interrupt whose busy verdict never settles should fail closed"
+  assert_contains "$out" "the interrupt did not take" "the failure should say the interrupt did not take"
+  pass "fm-control interrupt: a busy verdict that never settles fails closed rather than claiming success"
+}
+
+test_interrupt_settles_once_the_rendered_footer_clears() {
+  local dir out rc
+  dir=$(new_case settles)
+  add_task "$dir" t1 grok
+  alive_as "$dir" grok
+  printf '╭────╮\n│    │\n╰────╯\n Shift+Tab:mode │ Ctrl+.:shortcuts\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "an interrupt whose verdict reads idle should succeed"$'\n'"$out"
+  assert_contains "$out" "verified=agent-alive" "the proof should name the surviving agent"
+  [ "$(keys_sent "$dir")" = "C-c" ] || fail "grok should be cancelled with C-c, got: $(keys_sent "$dir")"
+  pass "fm-control interrupt: grok's cancel lands and its idle footer settles the verdict"
+}
+
 # --- 6. marker non-regression -----------------------------------------------
 
 test_secondmate_control_command_carries_no_marker() {
@@ -586,5 +619,7 @@ test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
 test_interrupt_records_idle_against_the_armed_generation
 test_agent_that_does_not_stop_fails_closed
+test_interrupt_that_does_not_settle_fails_closed
+test_interrupt_settles_once_the_rendered_footer_clears
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task

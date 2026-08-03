@@ -81,6 +81,7 @@
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
+#   FM_CONTROL_SETTLE_WAIT       busy->not-busy settle after an interrupt (5)
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
@@ -131,6 +132,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
+SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
@@ -324,7 +326,7 @@ record_interrupt_idle() {
 # when the backend could confirm the agent survived the interrupt, `endpoint`
 # when only the endpoint's existence could be confirmed.
 do_interrupt() {
-  local proof after
+  local proof after elapsed
   send_interrupt_keys
   fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
     || die "task $ID's endpoint disappeared while interrupting it; no further control action is safe"
@@ -339,11 +341,22 @@ do_interrupt() {
   fi
   record_interrupt_idle
   # No stale busy record may survive the interrupted turn. After the
-  # firstmate-owned idle event above this holds unless the write was refused -
-  # a stale generation, or another writer racing - which is a real failure.
+  # firstmate-owned idle event above this is immediate for every adapter with a
+  # semantic source. Grok is the exception: it has no semantic writer yet, so
+  # its verdict comes from a rendered footer that needs a beat to repaint after
+  # the cancel. Give any still-busy verdict that bounded settle rather than
+  # calling a landed interrupt a failure - but keep the failure, because a
+  # verdict that never settles means the interrupt did not take.
   after=$(busy_verdict)
+  elapsed=0
+  while [ "${after%% *}" = busy ]; do
+    awk -v e="$elapsed" -v t="$SETTLE_WAIT" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+    after=$(busy_verdict)
+  done
   [ "${after%% *}" != busy ] \
-    || die "task $ID still reads busy after its interrupt (${after}); its semantic state could not be settled"
+    || die "task $ID still reads busy ${SETTLE_WAIT}s after its interrupt (${after}); the interrupt did not take"
   printf '%s' "$proof"
 }
 
