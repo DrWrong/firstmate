@@ -122,10 +122,16 @@ FORCE=${2:-}
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
+META_LOCK=
+META_LOCK_HELD=0
 teardown_release_locks() {
   local status=$?
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
     teardown_release_herdr_locks || true
+  fi
+  if [ "$META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$META_LOCK" || true
+    META_LOCK_HELD=0
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CONTROL_LOCK" || true
@@ -145,6 +151,10 @@ fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
+[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+fm_lock_acquire_wait "$META_LOCK"
+META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
@@ -1722,6 +1732,8 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.kimi-turnend-token" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
+fm_lock_release "$META_LOCK"
+META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
