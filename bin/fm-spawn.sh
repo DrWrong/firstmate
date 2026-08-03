@@ -589,7 +589,17 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
   fi
-  ARG3=$HARNESS_ARG
+  # With no explicit harness, a relaunch reuses the harness already recorded
+  # for this task. It must NOT fall through to the fresh-spawn config
+  # resolution, which would silently move an existing task onto whatever the
+  # crew or secondmate default currently says. Choosing a different harness is
+  # the caller's explicit decision, made with --harness (bin/fm-control.sh
+  # resolves that decision, including a secondmate's durable pin).
+  ARG3=${HARNESS_ARG:-$RELAUNCH_PRIOR_HARNESS}
+  [ -n "$ARG3" ] || {
+    echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
+    exit 1
+  }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|pi-signed|grok|kimi)

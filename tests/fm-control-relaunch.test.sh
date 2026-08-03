@@ -324,6 +324,69 @@ test_turnend_auth_paths_are_owned_by_the_control_adapter() {
   pass "fm-control-lib: one owner resolves each harness's turn-end registry entry, and refuses a malformed token"
 }
 
+test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
+  local dir home out
+  dir=$(new_case smpin sm3)
+  home="$dir/home"
+  mkdir -p "$home/config"
+  printf 'codex some-model high\n' > "$home/config/secondmate-harness"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state"
+  printf 'sm3\n' > "$dir/smhome/.fm-secondmate-home"
+  {
+    echo "window=fmses:fm-sm3"
+    echo "endpoint_task_id=sm3"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm3.meta"
+  printf '%s\n' "fm-sm3" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  out=$(run_control "$dir" sm3 relaunch)
+  [ "$(journal_field "$dir" sm3 to_harness)" = codex ] \
+    || fail "a secondmate relaunch should pick up the configured harness pin, got '$(journal_field "$dir" sm3 to_harness)'"
+  [ "$(journal_field "$dir" sm3 to_model)" = some-model ] \
+    || fail "the configured model token should come with the pin"
+  [ "$(journal_field "$dir" sm3 to_effort)" = high ] \
+    || fail "the configured effort token should come with the pin"
+  assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
+  pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
+}
+
+test_ship_relaunch_ignores_the_crew_harness_config() {
+  local dir out
+  dir=$(new_case crewcfg rl20)
+  add_ship_task "$dir" rl20 claude
+  mkdir -p "$dir/home/config"
+  printf 'codex\n' > "$dir/home/config/crew-harness"
+  out=$(run_control "$dir" rl20 relaunch --note "same worker, same runtime")
+  assert_contains "$out" "harness=claude from=claude" \
+    "a ship relaunch must keep its recorded harness rather than re-reading crew config"
+  [ "$(meta_field "$dir" rl20 harness)" = claude ] \
+    || fail "a ship relaunch must not silently move onto the configured crew harness"
+  pass "fm-control relaunch: a ship task keeps its recorded harness instead of re-reading crew config"
+}
+
+test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
+  local dir out
+  dir=$(new_case spawnharness rl21)
+  add_ship_task "$dir" rl21 claude
+  mkdir -p "$dir/home/config"
+  printf 'codex\n' > "$dir/home/config/crew-harness"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl21 --relaunch)
+  [ "$(meta_field "$dir" rl21 harness)" = claude ] \
+    || fail "fm-spawn --relaunch without --harness must reuse the recorded harness, got '$(meta_field "$dir" rl21 harness)'"
+  assert_contains "$out" "spawned rl21 harness=claude" "the launch should report the recorded harness"
+  pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
+}
+
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
 test_missing_worktree_refuses_before_stopping_anything() {
@@ -564,6 +627,9 @@ test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
 test_turnend_auth_paths_are_owned_by_the_control_adapter
+test_secondmate_relaunch_picks_up_the_configured_harness_pin
+test_ship_relaunch_ignores_the_crew_harness_config
+test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical

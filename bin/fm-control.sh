@@ -401,6 +401,9 @@ RELAUNCH_BRIEF=
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 PRIOR_HARNESS=$HARNESS
+CONFIG_HARNESS=
+CONFIG_MODEL=
+CONFIG_EFFORT=
 PRIOR_MODEL=
 PRIOR_EFFORT=
 TARGET_HARNESS=$HARNESS
@@ -484,10 +487,29 @@ resolve_relaunch_profile() {
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
+  CONFIG_HARNESS=
+  CONFIG_MODEL=
+  CONFIG_EFFORT=
+  if [ "$KIND" = secondmate ]; then
+    # A secondmate's harness, model, and effort are a durable configured pin
+    # that every respawn re-resolves (the secondmate-provisioning contract), so
+    # a relaunch with no explicit harness picks up a newly configured one
+    # instead of freezing whatever this incarnation happens to run. Crewmates
+    # and scouts deliberately do NOT resolve config here: their harness comes
+    # from firstmate's own dispatch-profile judgment at intake, and silently
+    # re-resolving it would bypass that consultation.
+    CONFIG_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" secondmate 2>/dev/null || true)
+    CONFIG_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
+    CONFIG_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort 2>/dev/null || true)
+  fi
   if [ "$HARNESS_SET" = 1 ]; then
     fm_control_harness_supported "$NEW_HARNESS" \
       || die "'$NEW_HARNESS' is not a verified harness; fm-control refuses to relaunch onto an adapter with no verified control or launch mechanics"
     TARGET_HARNESS=$NEW_HARNESS
+  elif [ -n "$CONFIG_HARNESS" ]; then
+    fm_control_harness_supported "$CONFIG_HARNESS" \
+      || die "the configured secondmate harness '$CONFIG_HARNESS' is not verified; fm-control refuses to relaunch onto an adapter with no verified control or launch mechanics"
+    TARGET_HARNESS=$CONFIG_HARNESS
   else
     TARGET_HARNESS=$PRIOR_HARNESS
   fi
@@ -496,6 +518,8 @@ resolve_relaunch_profile() {
   # caller names them too.
   if [ "$MODEL_SET" = 1 ]; then
     TARGET_MODEL=$NEW_MODEL
+  elif [ -n "$CONFIG_HARNESS" ]; then
+    TARGET_MODEL=${CONFIG_MODEL:-default}
   elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
     TARGET_MODEL=$PRIOR_MODEL
   else
@@ -503,6 +527,8 @@ resolve_relaunch_profile() {
   fi
   if [ "$EFFORT_SET" = 1 ]; then
     TARGET_EFFORT=$NEW_EFFORT
+  elif [ -n "$CONFIG_HARNESS" ]; then
+    TARGET_EFFORT=${CONFIG_EFFORT:-default}
   elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
     TARGET_EFFORT=$PRIOR_EFFORT
   else
