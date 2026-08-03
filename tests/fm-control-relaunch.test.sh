@@ -219,6 +219,30 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_relaunch_preserves_durable_task_metadata() {
+  local dir out rc
+  dir=$(new_case durable-meta rl19)
+  add_ship_task "$dir" rl19 claude
+  {
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
+    printf '%s\n' 'pr_head=feature/relaunch'
+    printf '%s\n' 'x_request=request-19'
+    printf '%s\n' 'decisions_reviewed=1'
+  } >> "$dir/home/state/rl19.meta"
+
+  out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
+  expect_code 0 "$rc" "relaunch should preserve durable metadata"$'\n'"$out"
+  [ "$(meta_field "$dir" rl19 pr)" = "https://github.com/example/repo/pull/19" ] \
+    || fail "the task PR must survive relaunch"
+  [ "$(meta_field "$dir" rl19 pr_head)" = "feature/relaunch" ] \
+    || fail "the task PR head must survive relaunch"
+  [ "$(meta_field "$dir" rl19 x_request)" = "request-19" ] \
+    || fail "the task X request must survive relaunch"
+  [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
+    || fail "the task decision state must survive relaunch"
+  pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
 test_relaunch_appends_the_progress_note_to_the_instructions() {
   local dir out rc brief
   dir=$(new_case note rl2)
@@ -838,6 +862,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_preserves_durable_task_metadata
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
