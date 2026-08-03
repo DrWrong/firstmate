@@ -1,0 +1,590 @@
+#!/usr/bin/env bash
+# fm-control.sh: the agent lifecycle CONTROL plane.
+#
+# These tests pin the control plane's observable behavior hermetically - a
+# stubbed session provider, no real agent - through the executable interface
+# firstmate actually calls:
+#   1. Adapter contract: every verified harness gets its own verified exit
+#      command and interrupt key, delivered as bytes to the endpoint.
+#   2. Backend capability: a backend that cannot deliver the harness's
+#      interrupt key, and a backend with no recovery-grade agent-state
+#      classifier, both refuse instead of acting blind.
+#   3. Exact-id scoping: a window label, an explicit endpoint, an unknown id,
+#      and a record bound to another task are all refused.
+#   4. Verb allowlist: no arbitrary text, no raw keys, no resume.
+#   5. Lifecycle states: busy interrupts first, idle does not, already-stopped
+#      is idempotent success, and an agent that does not stop fails closed.
+#   6. Marker non-regression: a control command to a kind=secondmate task
+#      carries NO from-firstmate marker and opens no pending-reply expectation,
+#      while fm-send's marking of the same task is untouched.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-control-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-marker-lib.sh"
+
+CONTROL="$ROOT/bin/fm-control.sh"
+SEND="$ROOT/bin/fm-send.sh"
+# fm_test_tmproot's own cleanup trap fires when its command substitution exits,
+# so recreate the root before resolving it and clean it up from this file's trap.
+TMP_ROOT=$(fm_test_tmproot fm-control)
+mkdir -p "$TMP_ROOT"
+TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
+trap 'rm -rf "$TMP_ROOT"' EXIT
+
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi"
+
+# --- fake session provider --------------------------------------------------
+#
+# A tmux stub whose whole model is four files under $FM_FAKE_DIR:
+#   command  the pane's foreground process name, which IS the agent-state
+#            classifier's input (bin/backends/tmux.sh).
+#   cwd      the pane's current path.
+#   literal  every `send-keys -l` payload, one per line - exactly what was
+#            typed into the composer.
+#   keys     every named key send, one per line.
+# Two transitions make it a lifecycle model rather than a recorder: a literal
+# that is the harness's exit command flips `command` to a shell (the agent
+# stopped), and a literal carrying a launch brief flips it to the value in
+# `becomes` (a new agent came up). FM_FAKE_NEVER_DIES suppresses the first, so
+# a stubborn agent can be tested too.
+make_tmux_stub() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    payload=${1:-}
+    if [ "$literal" = 1 ]; then
+      printf '%s\n' "$payload" >> "$D/literal"
+      if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
+         && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
+        printf 'zsh' > "$D/command"
+      fi
+      case "$payload" in
+        *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
+      esac
+    else
+      printf '%s\n' "$payload" >> "$D/keys"
+    fi
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
+      esac
+    done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  list-windows)
+    if [ -f "$D/windows" ]; then cat "$D/windows"; fi
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  cat > "$fb/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fb/sleep"
+  printf '%s\n' "$fb"
+}
+
+# new_case <name> -> echoes a case dir holding home/, fake/, and fakebin.
+new_case() {
+  local dir="$TMP_ROOT/$1-$RANDOM"
+  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
+  : > "$dir/fake/literal"
+  : > "$dir/fake/keys"
+  printf 'zsh' > "$dir/fake/command"
+  printf 'claude' > "$dir/fake/becomes"
+  make_tmux_stub "$dir" >/dev/null
+  printf '%s\n' "$dir"
+}
+
+# add_task <case-dir> <id> <harness> [kind] [backend] [window]
+# Builds the task's worktree (a real git worktree so the relaunch checkpoint
+# has something to account for), its brief, and its state/<id>.meta.
+add_task() {
+  local dir=$1 id=$2 harness=$3 kind=${4:-ship} backend=${5:-tmux}
+  local window=${6:-fmses:fm-$id}
+  local home="$dir/home" proj="$dir/proj-$id" wt="$dir/wt-$id"
+  fm_git_worktree "$proj" "$wt" "task-$id"
+  mkdir -p "$home/data/$id"
+  printf '# brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  {
+    echo "window=$window"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo "harness=$harness"
+    echo "kind=$kind"
+    echo "mode=no-mistakes"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    [ "$backend" = tmux ] || echo "backend=$backend"
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$wt" > "$dir/fake/cwd"
+}
+
+# run_control <case-dir> <args...>: run fm-control against the case's home with
+# the stubbed provider on PATH. Echoes combined output; returns its exit code.
+run_control() {
+  local dir=$1; shift
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_INTERRUPT_WAIT=0.05 \
+    FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    "$CONTROL" "$@" 2>&1
+}
+
+alive_as() {  # <case-dir> <command-name>
+  printf '%s' "$2" > "$1/fake/command"
+}
+
+literals() {  # <case-dir>
+  cat "$1/fake/literal"
+}
+
+# Every named key EXCEPT Enter, which is submission mechanics shared with every
+# text send rather than a control-plane key.
+keys_sent() {  # <case-dir>
+  grep -v '^Enter$' "$1/fake/keys" || true
+}
+
+# --- 1. adapter contract across every verified harness -----------------------
+
+test_exit_types_each_harness_verified_command() {
+  local dir out rc harness expected
+  for harness in $VERIFIED_HARNESSES; do
+    dir=$(new_case "exit-$harness")
+    add_task "$dir" t1 "$harness"
+    alive_as "$dir" "$harness"
+    out=$(run_control "$dir" t1 exit); rc=$?
+    expect_code 0 "$rc" "exit on $harness should succeed"$'\n'"$out"
+    expected=$(fm_control_exit_command "$harness")
+    [ "$(literals "$dir")" = "$expected" ] \
+      || fail "exit on $harness should type exactly '$expected', got: $(literals "$dir")"
+    assert_contains "$out" "stopped t1 harness=$harness" "exit should report the stop for $harness"
+  done
+  pass "fm-control exit: every verified harness gets its own verified exit command"
+}
+
+test_interrupt_sends_each_harness_verified_key() {
+  local dir out rc harness key repeat got want
+  for harness in $VERIFIED_HARNESSES; do
+    dir=$(new_case "int-$harness")
+    add_task "$dir" t1 "$harness"
+    alive_as "$dir" "$harness"
+    out=$(run_control "$dir" t1 interrupt); rc=$?
+    expect_code 0 "$rc" "interrupt on $harness should succeed"$'\n'"$out"
+    key=$(fm_control_interrupt_key "$harness")
+    repeat=$(fm_control_interrupt_repeat "$harness")
+    want=$(for _ in $(seq 1 "$repeat"); do printf '%s\n' "$key"; done)
+    got=$(keys_sent "$dir")
+    [ "$got" = "$want" ] \
+      || fail "interrupt on $harness should send $repeat x $key, got: $got"
+    [ -z "$(literals "$dir")" ] \
+      || fail "interrupt on $harness must type no text, got: $(literals "$dir")"
+  done
+  pass "fm-control interrupt: every verified harness gets its own verified key and repeat count"
+}
+
+test_opencode_interrupts_twice_and_others_once() {
+  # The one adapter that differs, asserted through the delivered keys rather
+  # than the table, so a regression in either shows up here.
+  local dir
+  dir=$(new_case int-double)
+  add_task "$dir" t1 opencode
+  alive_as "$dir" opencode
+  run_control "$dir" t1 interrupt >/dev/null
+  [ "$(keys_sent "$dir" | wc -l | tr -d ' ')" = 2 ] \
+    || fail "opencode should receive a double Escape"
+  dir=$(new_case int-single)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  run_control "$dir" t1 interrupt >/dev/null
+  [ "$(keys_sent "$dir" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "claude should receive a single Escape"
+  pass "fm-control interrupt: opencode needs a double Escape, claude a single one"
+}
+
+test_unverified_harness_is_refused() {
+  local dir out rc
+  dir=$(new_case unverified)
+  add_task "$dir" t1 someagent
+  alive_as "$dir" someagent
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an unverified harness should refuse"
+  assert_contains "$out" "no verified control mechanics" "refusal should name the missing verification"
+  [ -z "$(literals "$dir")" ] || fail "an unverified harness must receive no bytes"
+  pass "fm-control: a harness with no verified control mechanics is refused, not guessed at"
+}
+
+# --- 2. backend capability matrix -------------------------------------------
+
+test_backend_key_capability_matrix() {
+  local backend key
+  for backend in tmux herdr zellij cmux; do
+    for key in Escape Enter C-c; do
+      fm_control_backend_supports_key "$backend" "$key" \
+        || fail "$backend should be able to deliver $key"
+    done
+  done
+  fm_control_backend_supports_key orca Escape \
+    && fail "orca's terminal API has no Escape and must not claim it"
+  fm_control_backend_supports_key orca C-c || fail "orca should deliver C-c"
+  fm_control_backend_supports_key orca Enter || fail "orca should deliver Enter"
+  pass "fm-control-lib: the backend key matrix matches each adapter's real send-key surface"
+}
+
+test_orca_refuses_an_escape_harness_interrupt() {
+  local dir out rc
+  dir=$(new_case orca-escape)
+  add_task "$dir" t1 claude ship orca "term-1"
+  # Orca records its endpoint as terminal=, which endpoint validation requires.
+  {
+    cat "$dir/home/state/t1.meta"
+    echo "terminal=term-1"
+    echo "orca_worktree_id=wt-1"
+  } > "$dir/home/state/t1.meta.new"
+  sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 1 "$rc" "an Escape harness on orca should refuse"
+  assert_contains "$out" "cannot deliver" "refusal should name the undeliverable key"
+  pass "fm-control interrupt: a backend that cannot deliver the harness's key refuses instead of sending another"
+}
+
+test_unverified_state_backends_refuse_stop_verbs() {
+  local dir out rc backend
+  for backend in zellij cmux; do
+    dir=$(new_case "nostate-$backend")
+    if [ "$backend" = zellij ]; then
+      add_task "$dir" t1 claude ship zellij "sess:7"
+      {
+        echo "zellij_session=sess"
+        echo "zellij_tab_id=1"
+        echo "zellij_pane_id=7"
+      } >> "$dir/home/state/t1.meta"
+    else
+      add_task "$dir" t1 claude ship cmux "ws1:surface1"
+      {
+        echo "cmux_workspace_id=ws1"
+        echo "cmux_surface_id=surface1"
+      } >> "$dir/home/state/t1.meta"
+    fi
+    out=$(run_control "$dir" t1 exit); rc=$?
+    expect_code 1 "$rc" "exit on $backend should refuse"$'\n'"$out"
+    assert_contains "$out" "no recovery-grade agent-state classifier" \
+      "the $backend refusal should name the missing stop proof"
+    [ -z "$(literals "$dir")" ] || fail "$backend must receive no exit command"
+    out=$(run_control "$dir" t1 relaunch --note x); rc=$?
+    expect_code 1 "$rc" "relaunch on $backend should refuse"$'\n'"$out"
+    assert_contains "$out" "no recovery-grade agent-state classifier" \
+      "the $backend relaunch refusal should name the missing stop proof"
+  done
+  pass "fm-control: a backend that cannot prove an agent stopped refuses exit and relaunch"
+}
+
+test_state_verified_backends_are_exactly_tmux_and_herdr() {
+  fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
+  fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
+  local backend
+  for backend in zellij orca cmux; do
+    fm_control_backend_state_verified "$backend" \
+      && fail "$backend has no recovery-grade classifier and must not claim one"
+  done
+  pass "fm-control-lib: stop-proving verbs are gated on the backends that really classify agent state"
+}
+
+# --- 3. exact-id scoping ----------------------------------------------------
+
+test_window_label_is_refused_with_the_exact_id() {
+  local dir out rc
+  dir=$(new_case label)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" fm-t1 exit); rc=$?
+  expect_code 1 "$rc" "a window label should refuse"
+  assert_contains "$out" "pass the exact task id 't1'" "the refusal should name the exact id"
+  [ -z "$(literals "$dir")" ] || fail "a refused target must receive no bytes"
+  pass "fm-control: a legacy window label is refused and the exact task id is named"
+}
+
+test_explicit_endpoint_is_refused() {
+  local dir out rc
+  dir=$(new_case endpoint)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" "fmses:fm-t1" exit); rc=$?
+  expect_code 1 "$rc" "an explicit endpoint should refuse"
+  assert_contains "$out" "exact task id only" "the refusal should name the exact-id rule"
+  [ -z "$(literals "$dir")" ] || fail "a refused target must receive no bytes"
+  pass "fm-control: an explicit backend endpoint is never a control target"
+}
+
+test_unknown_task_is_refused() {
+  local dir out rc
+  dir=$(new_case unknown)
+  add_task "$dir" t1 claude
+  out=$(run_control "$dir" t2 exit); rc=$?
+  expect_code 1 "$rc" "an unknown task should refuse"
+  assert_contains "$out" "no task 't2'" "the refusal should name the missing task"
+  pass "fm-control: an unrecorded task id is refused"
+}
+
+test_record_bound_to_another_task_is_refused() {
+  local dir out rc
+  dir=$(new_case foreign)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  sed 's/^endpoint_task_id=t1$/endpoint_task_id=other/' "$dir/home/state/t1.meta" \
+    > "$dir/home/state/t1.meta.tmp"
+  mv "$dir/home/state/t1.meta.tmp" "$dir/home/state/t1.meta"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a record bound to another task should refuse"
+  assert_contains "$out" "belongs to task other" "the refusal should name the conflicting binding"
+  [ -z "$(literals "$dir")" ] || fail "a foreign record must receive no bytes"
+  pass "fm-control: a record whose endpoint identity names another task is refused"
+}
+
+# --- 4. verb allowlist ------------------------------------------------------
+
+test_verb_allowlist_is_closed() {
+  local dir out rc
+  dir=$(new_case verbs)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 restart); rc=$?
+  expect_code 2 "$rc" "an unknown verb should be a usage error"
+  assert_contains "$out" "is not a control verb" "the refusal should say so"
+  assert_contains "$out" "interrupt" "the refusal should list the allowed verbs"
+  out=$(run_control "$dir" t1 --key); rc=$?
+  expect_code 2 "$rc" "a raw key is not a control verb"
+  out=$(run_control "$dir" t1 "please stop what you are doing"); rc=$?
+  expect_code 2 "$rc" "arbitrary text is not a control verb"
+  [ -z "$(literals "$dir")" ] || fail "a refused verb must send nothing"
+  [ -z "$(keys_sent "$dir")" ] || fail "a refused verb must send no keys"
+  pass "fm-control: the verb list is closed - no raw keys, no arbitrary text"
+}
+
+test_resume_is_refused_with_its_reason() {
+  local dir out rc
+  dir=$(new_case resume)
+  add_task "$dir" t1 claude
+  out=$(run_control "$dir" t1 resume); rc=$?
+  expect_code 2 "$rc" "resume should be refused"
+  assert_contains "$out" "not deterministic across the verified adapters" \
+    "the refusal should explain why resume is excluded"
+  assert_contains "$out" "relaunch" "the refusal should point at the deterministic alternative"
+  pass "fm-control: resume is refused with the determinism reason and the alternative"
+}
+
+test_relaunch_only_flags_are_rejected_on_other_verbs() {
+  local dir out rc
+  dir=$(new_case flags)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 exit --harness codex); rc=$?
+  expect_code 1 "$rc" "--harness should not apply to exit"
+  assert_contains "$out" "apply to 'relaunch' only" "the refusal should scope the flags"
+  pass "fm-control: profile and note flags belong to relaunch only"
+}
+
+# --- 5. lifecycle states ----------------------------------------------------
+
+test_already_stopped_exit_is_idempotent() {
+  local dir out rc
+  dir=$(new_case idempotent)
+  add_task "$dir" t1 claude
+  alive_as "$dir" zsh
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting an already-stopped agent should succeed"
+  assert_contains "$out" "already-stopped t1" "the outcome should say it was already stopped"
+  [ -z "$(literals "$dir")" ] || fail "an already-stopped agent must not be sent an exit command"
+  pass "fm-control exit: an already-stopped agent is idempotent success with no bytes sent"
+}
+
+test_missing_endpoint_refuses() {
+  local dir out rc
+  dir=$(new_case gone)
+  add_task "$dir" t1 claude
+  : > "$dir/fake/windows"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a missing endpoint should refuse"
+  assert_contains "$out" "recorded endpoint is gone" "the refusal should name the missing endpoint"
+  pass "fm-control exit: a vanished endpoint refuses instead of silently succeeding"
+}
+
+test_interrupt_refuses_when_no_agent_runs() {
+  local dir out rc
+  dir=$(new_case nointerrupt)
+  add_task "$dir" t1 claude
+  alive_as "$dir" zsh
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 1 "$rc" "interrupting a stopped agent should refuse"
+  assert_contains "$out" "nothing to interrupt" "the refusal should say there is no agent"
+  [ -z "$(keys_sent "$dir")" ] || fail "no key should reach a stopped agent"
+  pass "fm-control interrupt: refuses when no agent is running rather than keying a shell"
+}
+
+test_ambiguous_endpoint_refuses() {
+  local dir out rc
+  dir=$(new_case ambiguous)
+  add_task "$dir" t1 claude
+  alive_as "$dir" some-unrelated-process
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an unattributed endpoint should refuse"
+  assert_contains "$out" "positively classified" "the refusal should name the missing attribution"
+  [ -z "$(literals "$dir")" ] || fail "an unattributed endpoint must receive no bytes"
+  pass "fm-control exit: an endpoint whose process cannot be attributed refuses"
+}
+
+test_busy_agent_is_interrupted_before_the_exit_command() {
+  local dir out rc
+  dir=$(new_case busy)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  # Arm the semantic busy contract and record a busy turn, exactly as the
+  # harness's own lifecycle hook would.
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting a busy agent should succeed"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = "Escape" ] \
+    || fail "a busy agent should be interrupted once before its exit command, got: $(keys_sent "$dir")"
+  [ "$(literals "$dir")" = "/exit" ] || fail "the exit command should follow the interrupt"
+  pass "fm-control exit: a busy agent is interrupted first so the exit command reaches an idle composer"
+}
+
+test_idle_agent_is_not_interrupted() {
+  local dir out rc gen
+  dir=$(new_case idle)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1 --state idle --source fm-spawn --event seed)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting an idle agent should succeed"$'\n'"$out"
+  [ -z "$(keys_sent "$dir")" ] \
+    || fail "an idle agent needs no interrupt, got keys: $(keys_sent "$dir")"
+  [ "$(literals "$dir")" = "/exit" ] || fail "the exit command should still be sent"
+  pass "fm-control exit: an idle agent goes straight to its exit command"
+}
+
+test_interrupt_records_idle_against_the_armed_generation() {
+  local dir gen record
+  dir=$(new_case record)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  run_control "$dir" t1 interrupt >/dev/null
+  record=$(cat "$dir/home/state/t1.busy-state")
+  assert_contains "$record" "state=idle" "a proven interrupt should record idle"
+  assert_contains "$record" "source=fm-interrupt" "the record should attribute the interrupt to firstmate"
+  assert_contains "$record" "gen=$gen" "the record should bind the armed generation"
+  pass "fm-control interrupt: a proven interrupt records idle/fm-interrupt on the armed generation"
+}
+
+test_agent_that_does_not_stop_fails_closed() {
+  local dir out rc
+  dir=$(new_case stubborn)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(env FM_FAKE_NEVER_DIES=1 PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
+    FM_FAKE_DIR="$dir/fake" FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
+    "$CONTROL" t1 exit 2>&1); rc=$?
+  expect_code 1 "$rc" "an agent that ignores its exit command should fail closed"
+  assert_contains "$out" "did not stop" "the failure should say the agent did not stop"
+  assert_contains "$out" "nothing was changed" "the failure should say nothing was changed"
+  pass "fm-control exit: an agent that ignores its exit command fails closed instead of claiming success"
+}
+
+# --- 6. marker non-regression -----------------------------------------------
+
+test_secondmate_control_command_carries_no_marker() {
+  local dir out rc typed home
+  dir=$(new_case sm-marker)
+  home="$dir/home"
+  add_task "$dir" domain claude secondmate
+  # A secondmate's worktree IS its home; give it the marker its records need.
+  printf '%s\n' domain > "$dir/wt-domain/.fm-secondmate-home"
+  alive_as "$dir" claude
+  out=$(run_control "$dir" domain exit); rc=$?
+  expect_code 0 "$rc" "exiting a secondmate's agent should succeed"$'\n'"$out"
+  typed=$(literals "$dir")
+  [ "$typed" = "/exit" ] \
+    || fail "a secondmate control command must be the bare exit command, got: $typed"
+  case "$typed" in
+    *"$FM_FROMFIRST_MARK"*) fail "a control command must never carry the from-firstmate marker" ;;
+  esac
+  case "$typed" in
+    *corr=*) fail "a control command must never carry a pending-reply correlation id" ;;
+  esac
+  [ -z "$(find "$home/state/pending-replies" -type f 2>/dev/null | head -n 1)" ] \
+    || fail "a control command must not open a pending-reply expectation"
+  pass "fm-control: a lifecycle command to a secondmate is unmarked and opens no reply expectation"
+}
+
+test_fm_send_still_marks_the_same_secondmate_task() {
+  local dir log out rc
+  dir=$(new_case sm-send)
+  add_task "$dir" domain claude secondmate
+  log="$dir/fake/sendlog"
+  : > "$log"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_SEND_SETTLE=0 FM_ROOT_OVERRIDE="$dir/home" \
+    "$SEND" domain "audit the build" 2>&1); rc=$?
+  expect_code 0 "$rc" "fm-send to a secondmate should still succeed"$'\n'"$out"
+  case "$(literals "$dir")" in
+    "$FM_FROMFIRST_MARK"*) : ;;
+    *) fail "fm-send must still mark a kind=secondmate target: $(literals "$dir")" ;;
+  esac
+  pass "fm-control's arrival leaves fm-send's from-firstmate marking untouched"
+}
+
+test_exit_types_each_harness_verified_command
+test_interrupt_sends_each_harness_verified_key
+test_opencode_interrupts_twice_and_others_once
+test_unverified_harness_is_refused
+test_backend_key_capability_matrix
+test_orca_refuses_an_escape_harness_interrupt
+test_unverified_state_backends_refuse_stop_verbs
+test_state_verified_backends_are_exactly_tmux_and_herdr
+test_window_label_is_refused_with_the_exact_id
+test_explicit_endpoint_is_refused
+test_unknown_task_is_refused
+test_record_bound_to_another_task_is_refused
+test_verb_allowlist_is_closed
+test_resume_is_refused_with_its_reason
+test_relaunch_only_flags_are_rejected_on_other_verbs
+test_already_stopped_exit_is_idempotent
+test_missing_endpoint_refuses
+test_interrupt_refuses_when_no_agent_runs
+test_ambiguous_endpoint_refuses
+test_busy_agent_is_interrupted_before_the_exit_command
+test_idle_agent_is_not_interrupted
+test_interrupt_records_idle_against_the_armed_generation
+test_agent_that_does_not_stop_fails_closed
+test_secondmate_control_command_carries_no_marker
+test_fm_send_still_marks_the_same_secondmate_task

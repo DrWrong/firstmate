@@ -16,6 +16,22 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#   --relaunch launches a replacement agent for an EXISTING task into that
+#   task's own recorded endpoint and worktree instead of creating either. It is
+#   the launch half of the control plane (bin/fm-control.sh relaunch), which
+#   owns the checkpoint, the progress note, stopping the previous agent, and the
+#   transaction; call fm-control rather than this flag directly unless you are
+#   deliberately re-launching an already-stopped task. Every identity axis -
+#   backend, kind, project or home, worktree, endpoint - comes from the task's
+#   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
+#   positional, and batch pairs are all refused alongside it; only harness,
+#   model, and effort may change, which is what makes a harness switch one
+#   ordinary relaunch. It refuses unless the recorded endpoint is positively
+#   agent-free on a backend with a recovery-grade agent-state classifier (tmux
+#   or herdr), refuses unless the endpoint's shell is sitting in the recorded
+#   worktree, and clears the previous harness's per-task wiring before arming
+#   the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -187,6 +203,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -200,6 +218,7 @@ fm_refuse_if_gate_agent
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
+KIND_SET=0
 HARNESS_ARG=
 MODEL=
 EFFORT=
@@ -212,6 +231,7 @@ EFFORT_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
+RELAUNCH=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -232,8 +252,9 @@ for a in "$@"; do
     continue
   fi
   case "$a" in
-    --scout) KIND=scout ;;
-    --secondmate) KIND=secondmate ;;
+    --scout) KIND=scout; KIND_SET=1 ;;
+    --secondmate) KIND=secondmate; KIND_SET=1 ;;
+    --relaunch) RELAUNCH=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -261,39 +282,50 @@ case "$EFFORT" in
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
 
-# Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
-# firstmate's per-task decision, so they are required and closed-set validated
-# here rather than resolved from the project registry. Scouts deliver a report
-# and record no delivery posture; secondmate spawns hardcode theirs.
-if [ "$KIND" = ship ]; then
-  [ "$MODE_SET" -eq 1 ] || {
-    echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
-    exit 1
-  }
-  [ "$YOLO_SET" -eq 1 ] || {
-    echo "error: ship spawns require --yolo <on|off>; it is this task's routine approval authority, not a project lookup" >&2
-    exit 1
-  }
-  case "$MODE" in
-    no-mistakes|direct-PR|local-only) ;;
-    no-mistakes-prod-only)
-      echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
-      exit 1 ;;
-    *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
-  esac
-  case "$YOLO" in
-    on|off) ;;
-    *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
-  esac
+# --relaunch reuses an existing task's endpoint, worktree, project, and kind,
+# so every axis this block resolves for a fresh spawn instead comes from that
+# task's own durable record below. Contradicting it on the command line is a
+# refusal rather than a silently-ignored flag.
+if [ "$RELAUNCH" -eq 1 ]; then
+  [ "$BACKEND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded backend; --backend cannot override it" >&2; exit 1; }
+  [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
+  [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
+  [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
 else
-  [ "$MODE_SET" -eq 0 ] || {
-    echo "error: --mode applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
-    exit 1
-  }
-  [ "$YOLO_SET" -eq 0 ] || {
-    echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
-    exit 1
-  }
+  # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
+  # firstmate's per-task decision, so they are required and closed-set validated
+  # here rather than resolved from the project registry. Scouts deliver a report
+  # and record no delivery posture; secondmate spawns hardcode theirs.
+  if [ "$KIND" = ship ]; then
+    [ "$MODE_SET" -eq 1 ] || {
+      echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+      exit 1
+    }
+    [ "$YOLO_SET" -eq 1 ] || {
+      echo "error: ship spawns require --yolo <on|off>; it is this task's routine approval authority, not a project lookup" >&2
+      exit 1
+    }
+    case "$MODE" in
+      no-mistakes|direct-PR|local-only) ;;
+      no-mistakes-prod-only)
+        echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
+        exit 1 ;;
+      *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
+    esac
+    case "$YOLO" in
+      on|off) ;;
+      *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
+    esac
+  else
+    [ "$MODE_SET" -eq 0 ] || {
+      echo "error: --mode applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
+      exit 1
+    }
+    [ "$YOLO_SET" -eq 0 ] || {
+      echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
+      exit 1
+    }
+  fi
 fi
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
@@ -303,23 +335,26 @@ fi
 # recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
 # so the default path's meta stays byte-identical.
-if [ "$BACKEND_SET" -eq 1 ]; then
-  BACKEND=$BACKEND_ARG
-else
-  BACKEND=$(fm_backend_name)
-fi
-fm_backend_validate_spawn "$BACKEND" || exit 1
-fm_backend_source "$BACKEND" || exit 1
-if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
-  echo "error: backend=orca does not support --secondmate spawns yet" >&2
-  exit 1
-fi
-if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
-  echo "error: backend=cmux does not support --secondmate spawns yet" >&2
-  exit 1
-fi
-if [ "$BACKEND" = orca ]; then
-  fm_backend_orca_runtime_check || exit 1
+BACKEND=
+if [ "$RELAUNCH" -eq 0 ]; then
+  if [ "$BACKEND_SET" -eq 1 ]; then
+    BACKEND=$BACKEND_ARG
+  else
+    BACKEND=$(fm_backend_name)
+  fi
+  fm_backend_validate_spawn "$BACKEND" || exit 1
+  fm_backend_source "$BACKEND" || exit 1
+  if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
+    echo "error: backend=orca does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
+  if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
+    echo "error: backend=cmux does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
+  if [ "$BACKEND" = orca ]; then
+    fm_backend_orca_runtime_check || exit 1
+  fi
 fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
@@ -446,6 +481,10 @@ spawn_herdr_presentation_order_lock_release() {
 # one (task ids are bare slugs), so they fall straight through to the logic below.
 idpart=${POS[0]:-}
 idpart=${idpart%%=*}
+if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ]; then
+  echo "error: --relaunch is single-task only; relaunch each task explicitly" >&2
+  exit 1
+fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
@@ -491,7 +530,67 @@ PROJ=
 ARG3=
 FIRSTMATE_HOME=
 
-if [ "$KIND" = secondmate ]; then
+# --relaunch adoption: every identity axis comes from the task's own validated
+# durable record, never from the command line, so a relaunch can only ever
+# re-launch the task it names. The endpoint identity check is the same shared
+# validation teardown uses, so a malformed, ambiguous, or foreign record
+# refuses here exactly as it refuses there.
+RELAUNCH_PRIOR_HARNESS=
+if [ "$RELAUNCH" -eq 1 ]; then
+  [ "${#POS[@]}" -eq 1 ] || {
+    echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
+    exit 1
+  }
+  RELAUNCH_META="$STATE/$ID.meta"
+  [ -f "$RELAUNCH_META" ] || {
+    echo "error: --relaunch needs an existing task record; no $RELAUNCH_META" >&2
+    exit 1
+  }
+  fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
+  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+  RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
+  fm_backend_validate_spawn "$BACKEND" || exit 1
+  fm_backend_source "$BACKEND" || exit 1
+  # A relaunch must PROVE the previous agent is gone before it launches another
+  # one into the same endpoint, and only tmux and herdr have a recovery-grade
+  # classifier that can (bin/fm-control-lib.sh owns that capability table).
+  fm_control_backend_state_verified "$BACKEND" || {
+    echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
+    exit 1
+  }
+  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  [ "$RELAUNCH_STATE" = dead ] || {
+    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+    exit 1
+  }
+  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  KIND=$(fm_meta_get "$RELAUNCH_META" kind)
+  [ -n "$KIND" ] || KIND=ship
+  MODE=$(fm_meta_get "$RELAUNCH_META" mode)
+  YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
+  [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
+    echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
+    exit 1
+  }
+  if [ "$KIND" = secondmate ]; then
+    FIRSTMATE_HOME=$(fm_meta_get "$RELAUNCH_META" home)
+    [ -n "$FIRSTMATE_HOME" ] || FIRSTMATE_HOME=$RELAUNCH_WT
+  else
+    PROJ=$(fm_meta_get "$RELAUNCH_META" project)
+    [ -n "$PROJ" ] || {
+      echo "error: task $ID has no recorded project; refusing to relaunch" >&2
+      exit 1
+    }
+  fi
+  if [ "$BACKEND" = herdr ]; then
+    HERDR_SES=$(fm_meta_get "$RELAUNCH_META" herdr_session)
+    HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
+    HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
+    HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+  fi
+  ARG3=$HARNESS_ARG
+elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
     ''|claude|codex|opencode|pi|pi-signed|grok|kimi)
       ARG3=${POS[1]:-}
@@ -1075,6 +1174,18 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
+if [ "$RELAUNCH" -eq 1 ]; then
+  # Adopt the recorded endpoint instead of creating one. This is what keeps a
+  # relaunch a REPLACEMENT rather than a second copy of the task: no new
+  # terminal, no second worktree, and every uncommitted change left exactly
+  # where the previous agent left it.
+  T=$RELAUNCH_TARGET
+  # A secondmate's home already resolved WT above through the same validation a
+  # fresh secondmate spawn uses; every other kind takes the recorded worktree.
+  [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
+  WT_TARGET=$T
+  SES=${T%%:*}
+else
 case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
@@ -1302,6 +1413,7 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
+fi
 # #134 robustness: only tmux needs a worktree-detection target distinct from $T -
 # its rename-safe stable window id, set as WT_TARGET=$WID in the tmux branch above.
 # Every other backend addresses its pane/surface by the id already in $T, so default
@@ -1395,7 +1507,24 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$RELAUNCH" -eq 1 ]; then
+  # No worktree is acquired: the recorded one is reused as-is. What must be
+  # proven instead is that the adopted endpoint's shell is actually sitting in
+  # that worktree, so the replacement agent starts where the work is rather
+  # than wherever the pane happened to drift.
+  relaunch_wt_real=$(real_path_or_raw "$WT")
+  relaunch_seen=
+  for _ in $(seq 1 10); do
+    relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
+    [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
+    sleep 0.5
+  done
+  if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
+    echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
+    exit 1
+  fi
+  [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -1467,6 +1596,14 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
+if [ "$RELAUNCH" -eq 1 ]; then
+  # Retire the previous incarnation's per-task harness wiring before arming the
+  # new one. Without this, a harness switch would leave the old adapter's hook
+  # files and turn-end token registry entries behind, and even a same-harness
+  # relaunch would orphan the retired busy generation's token
+  # (bin/fm-control-lib.sh owns where those artifacts live).
+  fm_control_clear_harness_wiring "$RELAUNCH_PRIOR_HARNESS" "$WT" "$STATE_REAL" "$ID" || true
+fi
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
