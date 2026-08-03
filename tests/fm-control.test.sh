@@ -37,6 +37,19 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi"
 
+verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repeat
+  case "$1" in
+    claude) printf '/exit\tEscape\t1\n' ;;
+    codex) printf '/quit\tEscape\t1\n' ;;
+    opencode) printf '/exit\tEscape\t2\n' ;;
+    pi) printf '/quit\tEscape\t1\n' ;;
+    pi-signed) printf '/quit\tEscape\t1\n' ;;
+    grok) printf '/exit\tC-c\t1\n' ;;
+    kimi) printf '/exit\tEscape\t1\n' ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- fake session provider --------------------------------------------------
 #
 # A tmux stub whose whole model is four files under $FM_FAKE_DIR:
@@ -178,14 +191,14 @@ keys_sent() {  # <case-dir>
 # --- 1. adapter contract across every verified harness -----------------------
 
 test_exit_types_each_harness_verified_command() {
-  local dir out rc harness expected
+  local dir out rc harness expected key repeat
   for harness in $VERIFIED_HARNESSES; do
     dir=$(new_case "exit-$harness")
     add_task "$dir" t1 "$harness"
     alive_as "$dir" "$harness"
     out=$(run_control "$dir" t1 exit); rc=$?
     expect_code 0 "$rc" "exit on $harness should succeed"$'\n'"$out"
-    expected=$(fm_control_exit_command "$harness")
+    IFS=$'\t' read -r expected key repeat <<< "$(verified_adapter_contract "$harness")"
     [ "$(literals "$dir")" = "$expected" ] \
       || fail "exit on $harness should type exactly '$expected', got: $(literals "$dir")"
     assert_contains "$out" "stopped t1 harness=$harness" "exit should report the stop for $harness"
@@ -194,15 +207,14 @@ test_exit_types_each_harness_verified_command() {
 }
 
 test_interrupt_sends_each_harness_verified_key() {
-  local dir out rc harness key repeat got want
+  local dir out rc harness expected key repeat got want
   for harness in $VERIFIED_HARNESSES; do
     dir=$(new_case "int-$harness")
     add_task "$dir" t1 "$harness"
     alive_as "$dir" "$harness"
     out=$(run_control "$dir" t1 interrupt); rc=$?
     expect_code 0 "$rc" "interrupt on $harness should succeed"$'\n'"$out"
-    key=$(fm_control_interrupt_key "$harness")
-    repeat=$(fm_control_interrupt_repeat "$harness")
+    IFS=$'\t' read -r expected key repeat <<< "$(verified_adapter_contract "$harness")"
     want=$(for _ in $(seq 1 "$repeat"); do printf '%s\n' "$key"; done)
     got=$(keys_sent "$dir")
     [ "$got" = "$want" ] \

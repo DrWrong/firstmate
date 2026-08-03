@@ -135,6 +135,29 @@ WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+CONTROL_LOCK="$STATE/.control-$ID.lock"
+CONTROL_LOCK_HELD=0
+teardown_release_locks() {
+  local status=$?
+  if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
+    teardown_release_herdr_locks || true
+  fi
+  if [ "$CONTROL_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$CONTROL_LOCK" || true
+    CONTROL_LOCK_HELD=0
+  fi
+  return "$status"
+}
+trap teardown_release_locks EXIT
+fm_lock_try_acquire "$CONTROL_LOCK" || {
+  echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
+  exit 1
+}
+CONTROL_LOCK_HELD=1
+
 "$FM_ROOT/bin/fm-guard.sh" || true
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -1323,7 +1346,6 @@ $session	$lock_path"
       else
         TEARDOWN_HERDR_LOCK_RECORDS="$session	$lock_path"
       fi
-      trap teardown_release_herdr_locks EXIT
       return 0
     fi
     sleep 0.1
@@ -1693,8 +1715,6 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.kimi-turnend-token" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
-# The control-plane task lock is a lock directory or symlink, not a plain file.
-rm -rf "$STATE/.control-$ID.lock" "$STATE/.control-$ID.lock.steal"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
