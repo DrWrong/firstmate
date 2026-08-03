@@ -556,6 +556,24 @@ test_interrupt_records_idle_against_the_armed_generation() {
   pass "fm-control interrupt: a proven interrupt records idle/fm-interrupt on the armed generation"
 }
 
+test_interrupt_refuses_when_armed_idle_transition_cannot_publish() {
+  local dir gen out rc
+  dir=$(new_case stale-record)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  printf '%s\n' 'not-a-busy-record' > "$dir/home/state/t1.busy-state"
+  mkdir "$dir/home/state/t1.busy-state.lock"
+  out=$(FM_BUSY_LOCK_STALE_SECS=999999 run_control "$dir" t1 interrupt); rc=$?
+  expect_code 1 "$rc" "an interrupt must refuse when its idle event cannot publish"
+  assert_contains "$out" "could not be recorded idle" \
+    "the refusal should name the failed idle transition"
+  [ "$(cat "$dir/home/state/t1.busy-state")" = 'not-a-busy-record' ] \
+    || fail "the fixture should retain the malformed stale record"
+  pass "fm-control interrupt: an armed generation must publish verified idle state"
+}
+
 test_agent_that_does_not_stop_fails_closed() {
   local dir out rc
   dir=$(new_case stubborn)
@@ -665,6 +683,7 @@ test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
 test_interrupt_records_idle_against_the_armed_generation
+test_interrupt_refuses_when_armed_idle_transition_cannot_publish
 test_agent_that_does_not_stop_fails_closed
 test_interrupt_that_does_not_settle_fails_closed
 test_interrupt_settles_once_the_rendered_footer_clears

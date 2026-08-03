@@ -116,6 +116,9 @@ test_control_lock_contention_refuses_before_mutation() {
     wait "$holder" 2>/dev/null || true
     fail "could not stage a held lifecycle lock"
   }
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=other-task" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
 
   set +e
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
@@ -128,7 +131,7 @@ test_control_lock_contention_refuses_before_mutation() {
   [ ! -s "$dir/runtime.log" ] \
     || fail "contended teardown reached the runtime: $(cat "$dir/runtime.log")"
   assert_contains "$(cat "$dir/stderr")" "another lifecycle action is already running" \
-    "contended teardown should name the lifecycle action"
+    "contended teardown should serialize before reading mutable task metadata"
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
   pass "fm-teardown: a concurrent lifecycle action refuses before mutation"

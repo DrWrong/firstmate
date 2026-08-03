@@ -118,24 +118,6 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=${2:-}
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
-# down a worktree (see bin/fm-gate-refuse-lib.sh).
-fm_refuse_if_gate_agent
-FM_LOCK_LOG_PREFIX=teardown
-
-META="$STATE/$ID.meta"
-[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
-# This is the first cleanup authorization check. It is metadata-only and must
-# complete before fm-guard, a backend command, file removal, branch deletion,
-# worktree return, registry change, or process termination can run.
-fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
-BACKEND=$FM_BACKEND_VALIDATED_BACKEND
-T=$FM_BACKEND_VALIDATED_TARGET
-WT=$(fm_meta_get "$META" worktree)
-PROJ=$(fm_meta_get "$META" project)
-T_ORCA=
-[ "$BACKEND" != orca ] || T_ORCA=$T
-
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
@@ -157,6 +139,23 @@ fm_lock_try_acquire "$CONTROL_LOCK" || {
   exit 1
 }
 CONTROL_LOCK_HELD=1
+# Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
+# down a worktree (see bin/fm-gate-refuse-lib.sh).
+fm_refuse_if_gate_agent
+FM_LOCK_LOG_PREFIX=teardown
+
+META="$STATE/$ID.meta"
+[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+# This is the first cleanup authorization check. It is metadata-only and must
+# complete before fm-guard, a backend command, file removal, branch deletion,
+# worktree return, registry change, or process termination can run.
+fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+T=$FM_BACKEND_VALIDATED_TARGET
+WT=$(fm_meta_get "$META" worktree)
+PROJ=$(fm_meta_get "$META" project)
+T_ORCA=
+[ "$BACKEND" != orca ] || T_ORCA=$T
 
 "$FM_ROOT/bin/fm-guard.sh" || true
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)

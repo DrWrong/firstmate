@@ -371,6 +371,8 @@ SPAWN_CONTROL_LOCK=
 SPAWN_CONTROL_LOCK_HELD=0
 SPAWN_CONTROL_PARENT=0
 SPAWN_META_TMP=
+SPAWN_META_LOCK=
+SPAWN_META_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -442,6 +444,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
+  fi
+  if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
+    SPAWN_META_LOCK_HELD=0
+    fm_lock_release "$SPAWN_META_LOCK" || true
   fi
   if [ "$SPAWN_CONTROL_LOCK_HELD" = 1 ]; then
     SPAWN_CONTROL_LOCK_HELD=0
@@ -1875,6 +1881,9 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
   SPAWN_META_PATH=$SPAWN_META_TMP
 fi
@@ -1937,6 +1946,8 @@ preserve_relaunch_meta() {
 if [ "$RELAUNCH" -eq 1 ]; then
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
   SPAWN_META_TMP=
+  fm_lock_release "$SPAWN_META_LOCK"
+  SPAWN_META_LOCK_HELD=0
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 

@@ -26,6 +26,7 @@ set -u
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
+X_LINK="$ROOT/bin/fm-x-link.sh"
 # fm_test_tmproot's own cleanup trap fires when its command substitution exits,
 # so recreate the root before resolving it and clean it up from this file's trap.
 TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
@@ -192,6 +193,21 @@ SH
   chmod +x "$1/fakebin/mv"
 }
 
+make_meta_race_awk_stub() {  # <case-dir>
+  cat > "$1/fakebin/awk" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ -n "${FM_FAKE_META_RACE_PATH:-}" ] && [ "$arg" = "$FM_FAKE_META_RACE_PATH" ]; then
+    : > "$FM_FAKE_META_RACE_READY"
+    /bin/sleep 1
+    break
+  fi
+done
+exec "$FM_REAL_AWK" "$@"
+SH
+  chmod +x "$1/fakebin/awk"
+}
+
 # --- 1. same-harness relaunch -----------------------------------------------
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
@@ -241,6 +257,39 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+test_relaunch_serializes_concurrent_durable_metadata_publication() {
+  local dir control_pid link_out rc i=0
+  dir=$(new_case metadata-race rl28)
+  add_ship_task "$dir" rl28 claude
+  make_meta_race_awk_stub "$dir"
+  FM_REAL_AWK=$(command -v awk) \
+    FM_FAKE_META_RACE_PATH="$dir/home/state/rl28.meta" \
+    FM_FAKE_META_RACE_READY="$dir/meta-race-ready" \
+    run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
+  control_pid=$!
+  while [ ! -e "$dir/meta-race-ready" ] && [ "$i" -lt 200 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$dir/meta-race-ready" ] || {
+    kill "$control_pid" 2>/dev/null || true
+    wait "$control_pid" 2>/dev/null || true
+    fail "relaunch did not reach metadata publication"
+  }
+  link_out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_REAL_AWK="$(command -v awk)" \
+    "$X_LINK" rl28 request-28 --carry-count 1 --carry-ts 1700000000 \
+      --carry-platform x --carry-max 280 2>&1); rc=$?
+  expect_code 0 "$rc" "concurrent X metadata publication should serialize"$'\n'"$link_out"
+  wait "$control_pid"; rc=$?
+  expect_code 0 "$rc" "relaunch should complete after serialized metadata publication"$'\n'"$(cat "$dir/control.out")"
+  [ "$(meta_field "$dir" rl28 x_request)" = request-28 ] \
+    || fail "relaunch erased metadata published concurrently through the X interface"
+  [ "$(meta_field "$dir" rl28 x_followups)" = 1 ] \
+    || fail "relaunch erased the concurrent follow-up count"
+  pass "fm-control relaunch: concurrent task metadata publications serialize"
 }
 
 test_relaunch_appends_the_progress_note_to_the_instructions() {
@@ -421,6 +470,42 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
     || fail "the configured effort token should come with the pin"
   assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
+}
+
+test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
+  local dir home out rc
+  dir=$(new_case invalid-effort sm6)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm6"
+  printf 'codex some-model impossible\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/sm6/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm6\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm6"
+    echo "endpoint_task_id=sm6"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm6.meta"
+  printf '%s\n' "fm-sm6" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" sm6 relaunch); rc=$?
+  expect_code 0 "$rc" "an invalid configured effort should be ignored before stop"$'\n'"$out"
+  assert_contains "$out" "effort token 'impossible'" \
+    "relaunch should surface the same warning as a normal secondmate spawn"
+  [ "$(journal_field "$dir" sm6 to_effort)" = default ] \
+    || fail "invalid configured effort should normalize to default"
+  pass "fm-control relaunch: invalid configured effort is ignored before stop"
 }
 
 test_explicit_secondmate_harness_ignores_configured_profile_axes() {
@@ -863,6 +948,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_serializes_concurrent_durable_metadata_publication
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
@@ -873,6 +959,7 @@ test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
+test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one

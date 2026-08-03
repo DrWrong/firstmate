@@ -341,7 +341,7 @@ record_interrupt_idle() {
   # converted adapter trusts.
   [ -f "$STATE/$ID.busy-gen" ] || return 0
   "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" idle \
-    --current-gen --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
+    --current-gen --source fm-interrupt --event interrupt >/dev/null 2>&1
 }
 
 # do_interrupt: the shared interrupt action, used by the `interrupt` verb and
@@ -362,7 +362,8 @@ do_interrupt() {
       || die "task $ID's agent is '$after' after its interrupt key; an interrupt must leave the agent running"
     proof=agent-alive
   fi
-  record_interrupt_idle
+  record_interrupt_idle \
+    || die "task $ID's interrupt landed, but its armed busy generation could not be recorded idle; refusing to claim the stale record was cleared"
   # No stale busy record may survive the interrupted turn. After the
   # firstmate-owned idle event above this is immediate for every adapter with a
   # semantic source. Grok is the exception: it has no semantic writer yet, so
@@ -378,8 +379,15 @@ do_interrupt() {
     elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
     after=$(busy_verdict)
   done
-  [ "${after%% *}" != busy ] \
-    || die "task $ID still reads busy ${SETTLE_WAIT}s after its interrupt (${after}); the interrupt did not take"
+  case "$after" in
+    idle\ *) ;;
+    unknown\ *)
+      [ ! -e "$STATE/$ID.busy-gen" ] && [ ! -e "$STATE/$ID.busy-state" ] \
+        || die "task $ID's busy state is unresolved after its interrupt (${after}); refusing to claim the stale record was cleared"
+      ;;
+    busy\ *) die "task $ID still reads busy ${SETTLE_WAIT}s after its interrupt (${after}); the interrupt did not take" ;;
+    *) die "task $ID's busy state is unresolved after its interrupt (${after}); refusing to claim the stale record was cleared" ;;
+  esac
   printf '%s' "$proof"
 }
 
@@ -559,6 +567,13 @@ resolve_relaunch_profile() {
     CONFIG_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" secondmate 2>/dev/null || true)
     CONFIG_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
     CONFIG_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort 2>/dev/null || true)
+    case "$CONFIG_EFFORT" in
+      ''|low|medium|high|xhigh|max) ;;
+      *)
+        echo "warning: config/secondmate-harness effort token '$CONFIG_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2
+        CONFIG_EFFORT=
+        ;;
+    esac
   fi
   if [ "$HARNESS_SET" = 1 ]; then
     fm_control_harness_supported "$NEW_HARNESS" \
@@ -650,8 +665,10 @@ safe_checkpoint() {
       if [ ! -e "$child_meta" ] && [ ! -L "$child_meta" ]; then
         continue
       fi
-      [ -f "$child_meta" ] && [ ! -L "$child_meta" ] && cat "$child_meta" >/dev/null 2>&1 \
-        || die "secondmate $ID's child record $child_meta is not a readable regular file; refusing to relaunch"
+      if [ ! -f "$child_meta" ] || [ -L "$child_meta" ] \
+         || ! cat "$child_meta" >/dev/null 2>&1; then
+        die "secondmate $ID's child record $child_meta is not a readable regular file; refusing to relaunch"
+      fi
       children=$((children + 1))
     done
     CHECKPOINT_LINES+=("children=$children")
