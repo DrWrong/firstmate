@@ -383,36 +383,39 @@ test_record_bound_to_another_task_is_refused() {
   pass "fm-control: a record whose endpoint identity names another task is refused"
 }
 
+hold_lifecycle_lock() {  # <lock-path>
+  local lifecycle_lock_path=$1
+  . "$ROOT/bin/fm-wake-lib.sh"
+  fm_lock_try_acquire "$lifecycle_lock_path" || return 1
+  sleep 30
+}
+
 test_interrupt_and_exit_lock_before_task_state_resolution() {
-  local dir out rc verb lock holder i
+  local case_dir out rc verb lifecycle_lock_path holder i
   for verb in interrupt exit; do
-    dir=$(new_case "locked-$verb")
-    add_task "$dir" t1 claude
-    alive_as "$dir" claude
-    lock="$dir/home/state/.control-t1.lock"
-    (
-      . "$ROOT/bin/fm-wake-lib.sh"
-      fm_lock_try_acquire "$lock" || exit 1
-      sleep 30
-    ) &
+    case_dir=$(new_case "locked-$verb")
+    add_task "$case_dir" t1 claude
+    alive_as "$case_dir" claude
+    lifecycle_lock_path="$case_dir/home/state/.control-t1.lock"
+    hold_lifecycle_lock "$lifecycle_lock_path" &
     holder=$!
     i=0
-    while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+    while [ ! -e "$lifecycle_lock_path" ] && [ "$i" -lt 100 ]; do
       sleep 0.1
       i=$((i + 1))
     done
-    [ -e "$lock" ] || fail "could not stage the lifecycle lock for $verb"
-    sed 's/^endpoint_task_id=t1$/endpoint_task_id=other/' "$dir/home/state/t1.meta" \
-      > "$dir/home/state/t1.meta.tmp"
-    mv "$dir/home/state/t1.meta.tmp" "$dir/home/state/t1.meta"
-    out=$(run_control "$dir" t1 "$verb"); rc=$?
+    [ -e "$lifecycle_lock_path" ] || fail "could not stage the lifecycle lock for $verb"
+    sed 's/^endpoint_task_id=t1$/endpoint_task_id=other/' "$case_dir/home/state/t1.meta" \
+      > "$case_dir/home/state/t1.meta.tmp"
+    mv "$case_dir/home/state/t1.meta.tmp" "$case_dir/home/state/t1.meta"
+    out=$(run_control "$case_dir" t1 "$verb"); rc=$?
     kill "$holder" 2>/dev/null || true
     wait "$holder" 2>/dev/null || true
     expect_code 1 "$rc" "$verb should refuse a held lifecycle lock"
     assert_contains "$out" "another lifecycle action is already running" \
       "$verb should serialize before reading mutable task state"
-    [ -z "$(literals "$dir")" ] || fail "contended $verb must type no command"
-    [ -z "$(keys_sent "$dir")" ] || fail "contended $verb must send no control key"
+    [ -z "$(literals "$case_dir")" ] || fail "contended $verb must type no command"
+    [ -z "$(keys_sent "$case_dir")" ] || fail "contended $verb must send no control key"
   done
   pass "fm-control: interrupt and exit lock before task-state resolution"
 }
