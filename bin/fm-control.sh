@@ -447,6 +447,7 @@ META_PRIOR="$JOURNAL.meta-prior"
 BRIEF_PRIOR="$JOURNAL.brief-prior"
 NOTE_FILE="$JOURNAL.note"
 RELAUNCH_META_PUBLISHED=0
+RELAUNCH_AGENT_CONFIRMED=0
 RELAUNCH_TX=
 RELAUNCH_BRIEF=
 PRIOR_HARNESS=$HARNESS
@@ -524,7 +525,10 @@ relaunch_rollback() {
       esac
       ;;
     exited|launching)
-      if [ "$RELAUNCH_META_PUBLISHED" = 1 ] \
+      if [ "$RELAUNCH_AGENT_CONFIRMED" = 1 ]; then
+        journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-agent-confirmed" || true
+        echo "error: $ID's replacement is running on $TARGET_HARNESS, but transaction completion could not be persisted; its published record was retained for reconciliation" >&2
+      elif [ "$RELAUNCH_META_PUBLISHED" = 1 ] \
          || { [ -n "$RELAUNCH_TX" ] \
               && [ "$(fm_meta_get "$META" control_relaunch_tx)" = "$RELAUNCH_TX" ]; }; then
         # The launch owner published the new incarnation's record. Leaving it
@@ -761,6 +765,7 @@ do_relaunch() {
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
   }
+  RELAUNCH_AGENT_CONFIRMED=1
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0

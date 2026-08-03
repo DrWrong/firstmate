@@ -373,6 +373,12 @@ SPAWN_CONTROL_PARENT=0
 SPAWN_META_TMP=
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
+SPAWN_META_PUBLISH_STARTED=0
+RELAUNCH_REPLACEMENT_PENDING=0
+RELAUNCH_REPLACEMENT_BUSY_GEN=
+RELAUNCH_REPLACEMENT_HARNESS=
+RELAUNCH_REPLACEMENT_STATE=
+RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -395,6 +401,30 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
+     && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
+     && [ -n "$SPAWN_META_TMP" ] \
+     && [ ! -e "$SPAWN_META_TMP" ] \
+     && [ ! -L "$SPAWN_META_TMP" ]; then
+    RELAUNCH_REPLACEMENT_PENDING=0
+  fi
+  if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ]; then
+    RELAUNCH_REPLACEMENT_PENDING=0
+    if ! clear_relaunch_harness_wiring \
+        "$RELAUNCH_REPLACEMENT_HARNESS" \
+        "$RELAUNCH_REPLACEMENT_WT" \
+        "$RELAUNCH_REPLACEMENT_STATE" \
+        "$ID"; then
+      echo "warning: could not remove replacement wiring after aborted relaunch of $ID" >&2
+    fi
+    if [ -n "$RELAUNCH_REPLACEMENT_BUSY_GEN" ]; then
+      if ! "$FM_ROOT/bin/fm-busy-event.sh" retire \
+          "$RELAUNCH_REPLACEMENT_STATE" "$ID" \
+          --gen "$RELAUNCH_REPLACEMENT_BUSY_GEN"; then
+        echo "warning: could not retire replacement busy generation after aborted relaunch of $ID" >&2
+      fi
+    fi
+  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -1662,6 +1692,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: could not retire $RELAUNCH_PRIOR_HARNESS wiring for task $ID; refusing to arm the replacement" >&2
     exit 1
   }
+  RELAUNCH_REPLACEMENT_PENDING=1
+  RELAUNCH_REPLACEMENT_HARNESS=$HARNESS
+  RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
+  RELAUNCH_REPLACEMENT_WT=$WT
 fi
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
@@ -1686,6 +1720,7 @@ if [ "$KIND" != secondmate ]; then
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
       }
+      [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
       ;;
     kimi*)
       # Standalone Kimi stays unknown until fm_busy_kimi_verified opens on a
@@ -1966,7 +2001,10 @@ preserve_relaunch_meta() {
   fi
 } > "$SPAWN_META_PATH"
 if [ "$RELAUNCH" -eq 1 ]; then
+  SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  RELAUNCH_REPLACEMENT_PENDING=0
+  SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0

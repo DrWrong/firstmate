@@ -26,6 +26,7 @@ set -u
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
+PROMOTE="$ROOT/bin/fm-promote.sh"
 X_LINK="$ROOT/bin/fm-x-link.sh"
 # fm_test_tmproot's own cleanup trap fires when its command substitution exits,
 # so recreate the root before resolving it and clean it up from this file's trap.
@@ -153,6 +154,7 @@ run_control() {  # <case-dir> <args...>
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
+    FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -191,6 +193,11 @@ if [ -n "${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" ]; then
     if [ -f "$path" ] && grep -Fqx 'phase=complete' "$path"; then
       exit 1
     fi
+  done
+fi
+if [ -n "${FM_FAKE_META_PUBLISH_MV_FAIL:-}" ]; then
+  for path in "$@"; do
+    [ "$path" != "$FM_FAKE_META_PUBLISH_MV_FAIL" ] || exit 1
   done
 fi
 exec "$FM_REAL_MV" "$@"
@@ -785,11 +792,38 @@ test_complete_journal_failure_rolls_back_from_durable_phase() {
   expect_code 1 "$rc" "a failed complete journal replacement should fail closed"$'\n'"$out"
   [ "$(journal_field "$dir" rl27 phase)" = failed:launching ] \
     || fail "rollback should start from the last durable launching phase"
-  [ "$(journal_field "$dir" rl27 rollback)" = none-new-record-kept ] \
-    || fail "rollback should retain the published replacement record"
+  [ "$(journal_field "$dir" rl27 rollback)" = none-new-agent-confirmed ] \
+    || fail "rollback should retain the confirmed-running replacement"
   [ "$(meta_field "$dir" rl27 harness)" = codex ] \
     || fail "journal failure must not rewrite the published replacement record"
+  assert_contains "$out" "replacement is running" \
+    "journal failure should report the confirmed-running replacement"
+  assert_not_contains "$out" "no running agent could be confirmed" \
+    "journal failure should not contradict the confirmed agent state"
   pass "fm-control relaunch: failed journal replacement preserves durable phase"
+}
+
+test_prepublication_abort_retires_replacement_wiring_and_busy_state() {
+  local dir out rc real_mv meta
+  dir=$(new_case prepublishcleanup rl28)
+  add_ship_task "$dir" rl28 claude
+  meta="$dir/home/state/rl28.meta"
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$meta" \
+    run_control "$dir" rl28 relaunch --note "clean partial replacement state"); rc=$?
+  expect_code 1 "$rc" "a failed metadata publication should fail closed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl28 harness)" = claude ] \
+    || fail "a failed publication should retain the prior durable record"
+  [ ! -e "$dir/wt/.claude/settings.local.json" ] \
+    || fail "an aborted replacement should remove its harness wiring"
+  [ ! -e "$dir/home/state/rl28.busy-gen" ] \
+    || fail "an aborted replacement should retire its busy generation"
+  [ ! -e "$dir/home/state/rl28.busy-state" ] \
+    || fail "an aborted replacement should remove its seeded busy record"
+  [ "$(journal_field "$dir" rl28 rollback)" = prior-record-kept ] \
+    || fail "the journal should record the unpublished replacement rollback"
+  pass "fm-spawn relaunch: prepublication abort removes replacement state"
 }
 
 test_journal_records_the_checkpoint_it_proved() {
@@ -944,6 +978,7 @@ test_concurrent_relaunch_is_refused() {
   pass "fm-control relaunch: two control actions on one task serialize instead of interleaving"
 }
 
+# shellcheck disable=SC2031
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
   local dir out rc lock holder i=0
   dir=$(new_case spawnlock rl26)
@@ -969,6 +1004,34 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
     "direct relaunch spawn should name lifecycle contention"
   [ -z "$(cat "$dir/fake/literal")" ] || fail "contended direct relaunch spawn must deliver no launch bytes"
   pass "fm-spawn relaunch: direct entry participates in lifecycle serialization"
+}
+
+# shellcheck disable=SC2031
+test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
+  local dir out rc lock holder i=0
+  dir=$(new_case promotelock rl29)
+  add_ship_task "$dir" rl29 claude
+  lock="$dir/home/state/.control-rl29.lock"
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    sleep 30
+  ) &
+  holder=$!
+  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$lock" ] || fail "could not stage the promotion lifecycle lock"
+  out=$(FM_HOME="$dir/home" "$PROMOTE" rl29 --mode direct-PR --yolo on 2>&1); rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 1 "$rc" "promotion should refuse a concurrent lifecycle action"
+  assert_contains "$out" "another lifecycle action is already running" \
+    "promotion should lock before interpreting the task metadata"
+  [ "$(meta_field "$dir" rl29 kind)" = ship ] \
+    || fail "a contended promotion must leave task metadata unchanged"
+  pass "fm-promote: promotion participates in lifecycle serialization"
 }
 
 # --- 6. fm-spawn --relaunch's own refusals -----------------------------------
@@ -1050,12 +1113,14 @@ test_prepublication_failure_keeps_concurrent_durable_metadata
 test_post_publication_launch_failure_keeps_the_new_record
 test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase
+test_prepublication_abort_retires_replacement_wiring_and_busy_state
 test_journal_records_the_checkpoint_it_proved
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home
 test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
+test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
