@@ -383,6 +383,40 @@ test_record_bound_to_another_task_is_refused() {
   pass "fm-control: a record whose endpoint identity names another task is refused"
 }
 
+test_interrupt_and_exit_lock_before_task_state_resolution() {
+  local dir out rc verb lock holder i
+  for verb in interrupt exit; do
+    dir=$(new_case "locked-$verb")
+    add_task "$dir" t1 claude
+    alive_as "$dir" claude
+    lock="$dir/home/state/.control-t1.lock"
+    (
+      . "$ROOT/bin/fm-wake-lib.sh"
+      fm_lock_try_acquire "$lock" || exit 1
+      sleep 30
+    ) &
+    holder=$!
+    i=0
+    while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    [ -e "$lock" ] || fail "could not stage the lifecycle lock for $verb"
+    sed 's/^endpoint_task_id=t1$/endpoint_task_id=other/' "$dir/home/state/t1.meta" \
+      > "$dir/home/state/t1.meta.tmp"
+    mv "$dir/home/state/t1.meta.tmp" "$dir/home/state/t1.meta"
+    out=$(run_control "$dir" t1 "$verb"); rc=$?
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    expect_code 1 "$rc" "$verb should refuse a held lifecycle lock"
+    assert_contains "$out" "another lifecycle action is already running" \
+      "$verb should serialize before reading mutable task state"
+    [ -z "$(literals "$dir")" ] || fail "contended $verb must type no command"
+    [ -z "$(keys_sent "$dir")" ] || fail "contended $verb must send no control key"
+  done
+  pass "fm-control: interrupt and exit lock before task-state resolution"
+}
+
 # --- 4. verb allowlist ------------------------------------------------------
 
 test_verb_allowlist_is_closed() {
@@ -620,6 +654,7 @@ test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused
 test_record_bound_to_another_task_is_refused
+test_interrupt_and_exit_lock_before_task_state_resolution
 test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs

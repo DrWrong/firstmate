@@ -142,6 +142,24 @@ die() {  # <message>
   exit 1
 }
 
+CONTROL_LOCK=
+CONTROL_LOCK_HELD=0
+RELAUNCH_ACTIVE=0
+RELAUNCH_PHASE=start
+
+control_cleanup() {
+  local status=$?
+  if [ "$RELAUNCH_ACTIVE" = 1 ] \
+     && declare -F relaunch_rollback >/dev/null 2>&1; then
+    relaunch_rollback || true
+  fi
+  if [ "$CONTROL_LOCK_HELD" = 1 ]; then
+    CONTROL_LOCK_HELD=0
+    fm_lock_release "$CONTROL_LOCK" || true
+  fi
+  return "$status"
+}
+
 # --- argument parsing -------------------------------------------------------
 
 RAW_ID=${1:-}
@@ -231,6 +249,11 @@ if ! fm_task_id_creation_valid "$RAW_ID"; then
   die "'$RAW_ID' is not a valid task id"
 fi
 ID=$RAW_ID
+CONTROL_LOCK="$STATE/.control-$ID.lock"
+trap control_cleanup EXIT
+fm_lock_try_acquire "$CONTROL_LOCK" \
+  || die "another lifecycle action is already running for task $ID"
+CONTROL_LOCK_HELD=1
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ]; then
   case "$RAW_ID" in
@@ -415,12 +438,9 @@ JOURNAL="$STATE/$ID.control-relaunch"
 META_PRIOR="$JOURNAL.meta-prior"
 BRIEF_PRIOR="$JOURNAL.brief-prior"
 NOTE_FILE="$JOURNAL.note"
-RELAUNCH_ACTIVE=0
-RELAUNCH_PHASE=start
-RELAUNCH_SPAWN_OK=0
+RELAUNCH_META_PUBLISHED=0
+RELAUNCH_TX=
 RELAUNCH_BRIEF=
-CONTROL_LOCK="$STATE/.control-$ID.lock"
-CONTROL_LOCK_HELD=0
 PRIOR_HARNESS=$HARNESS
 CONFIG_HARNESS=
 CONFIG_MODEL=
@@ -457,17 +477,8 @@ journal_write() {  # <phase> [extra-line]...
   } > "$JOURNAL.tmp" && mv -f "$JOURNAL.tmp" "$JOURNAL"
 }
 
-control_cleanup() {
-  local status=$?
-  relaunch_rollback || true
-  if [ "$CONTROL_LOCK_HELD" = 1 ]; then
-    CONTROL_LOCK_HELD=0
-    fm_lock_release "$CONTROL_LOCK" || true
-  fi
-  return "$status"
-}
-
 relaunch_rollback() {
+  local state
   [ "$RELAUNCH_ACTIVE" = 1 ] || return 0
   [ "$RELAUNCH_PHASE" != complete ] || return 0
   RELAUNCH_ACTIVE=0
@@ -481,8 +492,31 @@ relaunch_rollback() {
       journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored" || true
       echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
       ;;
+    stopping)
+      state=$(agent_state 2>/dev/null || printf unknown)
+      case "$state" in
+        alive)
+          if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
+            cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
+          fi
+          journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored-agent-alive" || true
+          echo "error: relaunch of $ID failed while stopping the old agent, which is still running; its original instructions were restored" >&2
+          ;;
+        dead)
+          [ ! -f "$META_PRIOR" ] || cp -p "$META_PRIOR" "$META" 2>/dev/null || true
+          journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-restored-agent-dead" || true
+          echo "error: $ID's agent stopped but relaunch did not reach replacement launch; no agent is running, and its work plus progress note are preserved at $WT" >&2
+          ;;
+        *)
+          journal_write "failed:$RELAUNCH_PHASE" "rollback=none-agent-state-$state" || true
+          echo "error: relaunch of $ID failed while stopping the old agent and its state is '$state'; the durable record and progress note were retained for recovery" >&2
+          ;;
+      esac
+      ;;
     exited|launching)
-      if [ "$RELAUNCH_SPAWN_OK" = 1 ]; then
+      if [ "$RELAUNCH_META_PUBLISHED" = 1 ] \
+         || { [ -n "$RELAUNCH_TX" ] \
+              && [ "$(fm_meta_get "$META" control_relaunch_tx)" = "$RELAUNCH_TX" ]; }; then
         # The launch owner published the new incarnation's record. Leaving it
         # in place is the honest state: the task is now recorded on the new
         # harness with no agent confirmed, which is exactly what recovery
@@ -527,7 +561,7 @@ resolve_relaunch_profile() {
     fm_control_harness_supported "$NEW_HARNESS" \
       || die "'$NEW_HARNESS' is not a verified harness; fm-control refuses to relaunch onto an adapter with no verified control or launch mechanics"
     TARGET_HARNESS=$NEW_HARNESS
-  elif [ -n "$CONFIG_HARNESS" ]; then
+  elif [ "$HARNESS_SET" = 0 ] && [ -n "$CONFIG_HARNESS" ]; then
     fm_control_harness_supported "$CONFIG_HARNESS" \
       || die "the configured secondmate harness '$CONFIG_HARNESS' is not verified; fm-control refuses to relaunch onto an adapter with no verified control or launch mechanics"
     TARGET_HARNESS=$CONFIG_HARNESS
@@ -539,7 +573,7 @@ resolve_relaunch_profile() {
   # caller names them too.
   if [ "$MODEL_SET" = 1 ]; then
     TARGET_MODEL=$NEW_MODEL
-  elif [ -n "$CONFIG_HARNESS" ]; then
+  elif [ "$HARNESS_SET" = 0 ] && [ -n "$CONFIG_HARNESS" ]; then
     TARGET_MODEL=${CONFIG_MODEL:-default}
   elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
     TARGET_MODEL=$PRIOR_MODEL
@@ -548,7 +582,7 @@ resolve_relaunch_profile() {
   fi
   if [ "$EFFORT_SET" = 1 ]; then
     TARGET_EFFORT=$NEW_EFFORT
-  elif [ -n "$CONFIG_HARNESS" ]; then
+  elif [ "$HARNESS_SET" = 0 ] && [ -n "$CONFIG_HARNESS" ]; then
     TARGET_EFFORT=${CONFIG_EFFORT:-default}
   elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
     TARGET_EFFORT=$PRIOR_EFFORT
@@ -563,7 +597,7 @@ resolve_relaunch_profile() {
 # refuses outright when any of it cannot be established.
 CHECKPOINT_LINES=()
 safe_checkpoint() {
-  local wt_real wt_top wt_top_real head dirty children marker
+  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta
   CHECKPOINT_LINES=()
   [ -n "$WT" ] || die "task $ID has no recorded worktree; refusing to relaunch without a recorded local copy to preserve"
   [ -d "$WT" ] || die "task $ID's recorded worktree $WT is missing; refusing to relaunch and lose track of its work"
@@ -573,8 +607,23 @@ safe_checkpoint() {
   wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P) || wt_top_real=$wt_top
   [ "$wt_real" = "$wt_top_real" ] \
     || die "task $ID's recorded worktree $WT is not a worktree root (root is $wt_top); refusing to relaunch against an ambiguous checkout"
-  head=$(git -C "$WT" rev-parse HEAD 2>/dev/null || printf 'unborn')
-  if [ -n "$(git -C "$WT" status --porcelain 2>/dev/null | head -n 1)" ]; then
+  if head=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null); then
+    :
+  elif head_ref=$(git -C "$WT" symbolic-ref -q HEAD 2>/dev/null); then
+    if git -C "$WT" show-ref --verify --quiet "$head_ref" 2>/dev/null; then
+      die "task $ID's worktree HEAD exists but cannot be resolved; refusing to relaunch from an unreadable checkout"
+    else
+      head_ref_status=$?
+      [ "$head_ref_status" -eq 1 ] \
+        || die "task $ID's worktree HEAD cannot be inspected; refusing to relaunch from an unreadable checkout"
+      head=unborn
+    fi
+  else
+    die "task $ID's worktree HEAD cannot be inspected; refusing to relaunch from an unreadable checkout"
+  fi
+  status_output=$(git -C "$WT" status --porcelain 2>/dev/null) \
+    || die "task $ID's worktree status cannot be inspected; refusing to relaunch without accounting for local changes"
+  if [ -n "$status_output" ]; then
     dirty=yes
   else
     dirty=no
@@ -591,7 +640,17 @@ safe_checkpoint() {
       || die "task $ID's home $WT is not marked as its own seeded secondmate home (marker: ${marker:-none}); refusing to relaunch"
     [ -d "$WT/state" ] \
       || die "secondmate $ID's home has no readable state directory, so its child work cannot be accounted for; refusing to relaunch"
-    children=$(find "$WT/state" -maxdepth 1 -name '*.meta' -type f 2>/dev/null | wc -l | tr -d '[:space:]')
+    find "$WT/state" -mindepth 1 -maxdepth 1 -print >/dev/null 2>&1 \
+      || die "secondmate $ID's child records cannot be traversed; refusing to relaunch"
+    children=0
+    for child_meta in "$WT/state"/*.meta; do
+      if [ ! -e "$child_meta" ] && [ ! -L "$child_meta" ]; then
+        continue
+      fi
+      [ -f "$child_meta" ] && [ ! -L "$child_meta" ] && cat "$child_meta" >/dev/null 2>&1 \
+        || die "secondmate $ID's child record $child_meta is not a readable regular file; refusing to relaunch"
+      children=$((children + 1))
+    done
     CHECKPOINT_LINES+=("children=$children")
   fi
 }
@@ -650,12 +709,6 @@ do_relaunch() {
       ;;
   esac
 
-  # Serialize control actions on this task so two relaunches cannot interleave.
-  trap control_cleanup EXIT
-  fm_lock_try_acquire "$CONTROL_LOCK" \
-    || die "another control action is already running for task $ID"
-  CONTROL_LOCK_HELD=1
-
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"
   else
@@ -669,18 +722,25 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
+  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
-  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line"
+  RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
+  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
-  "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null \
-    || die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
-  RELAUNCH_SPAWN_OK=1
+  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+      "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
+    RELAUNCH_META_PUBLISHED=1
+  else
+    [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
+      || RELAUNCH_META_PUBLISHED=1
+    die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
+  fi
 
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"

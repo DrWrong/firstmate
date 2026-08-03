@@ -367,6 +367,10 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_CONTROL_LOCK=
+SPAWN_CONTROL_LOCK_HELD=0
+SPAWN_CONTROL_PARENT=0
+SPAWN_META_TMP=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -439,6 +443,11 @@ spawn_abort_cleanup() {
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
+  if [ "$SPAWN_CONTROL_LOCK_HELD" = 1 ]; then
+    SPAWN_CONTROL_LOCK_HELD=0
+    fm_lock_release "$SPAWN_CONTROL_LOCK" || true
+  fi
+  [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -520,6 +529,18 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+if [ "$RELAUNCH" -eq 1 ]; then
+  SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
+  control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
+  if [ "$control_owner" = "$PPID" ] && fm_pid_alive "$control_owner"; then
+    SPAWN_CONTROL_PARENT=1
+  elif fm_lock_try_acquire "$SPAWN_CONTROL_LOCK"; then
+    SPAWN_CONTROL_LOCK_HELD=1
+  else
+    echo "error: another lifecycle action is already running for task $ID" >&2
+    exit 1
+  fi
+fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
@@ -1852,6 +1873,11 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+SPAWN_META_PATH="$STATE/$ID.meta"
+if [ "$RELAUNCH" -eq 1 ]; then
+  SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
+  SPAWN_META_PATH=$SPAWN_META_TMP
+fi
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -1892,7 +1918,14 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+  if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
+    echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+  fi
+} > "$SPAWN_META_PATH"
+if [ "$RELAUNCH" -eq 1 ]; then
+  mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  SPAWN_META_TMP=
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

@@ -67,8 +67,14 @@ case "${1:-}" in
     if [ "$literal" = 1 ]; then
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
-        /exit|/quit) printf 'zsh' > "$D/command" ;;
-        *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
+        /exit|/quit)
+          printf 'zsh' > "$D/command"
+          [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
+          ;;
+        *'encode launch-brief'*)
+          cat "$D/becomes" > "$D/command"
+          [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
+          ;;
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
@@ -139,6 +145,7 @@ run_control() {  # <case-dir> <args...>
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -155,6 +162,18 @@ meta_field() {  # <case-dir> <id> <key>
 
 journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
+}
+
+make_git_failure_stub() {  # <case-dir>
+  cat > "$1/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case "${FM_FAKE_GIT_FAILURE:-}:$*" in
+  head:*' rev-parse --verify HEAD'|head:*' symbolic-ref -q HEAD') exit 128 ;;
+  status:*' status --porcelain') exit 128 ;;
+esac
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$1/fakebin/git"
 }
 
 # --- 1. same-harness relaunch -----------------------------------------------
@@ -325,14 +344,17 @@ test_turnend_auth_paths_are_owned_by_the_control_adapter() {
 }
 
 test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
-  local dir home out
+  local dir home out rc
   dir=$(new_case smpin sm3)
   home="$dir/home"
   mkdir -p "$home/config"
   printf 'codex some-model high\n' > "$home/config/secondmate-harness"
+  mkdir -p "$home/data/sm3"
+  printf '# secondmate brief\n' > "$home/data/sm3/brief.md"
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
-  mkdir -p "$dir/smhome/state"
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sm3\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
   {
     echo "window=fmses:fm-sm3"
     echo "endpoint_task_id=sm3"
@@ -348,7 +370,9 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   } > "$home/state/sm3.meta"
   printf '%s\n' "fm-sm3" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
-  out=$(run_control "$dir" sm3 relaunch)
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" sm3 relaunch); rc=$?
+  expect_code 0 "$rc" "a configured secondmate harness should relaunch"$'\n'"$out"
   [ "$(journal_field "$dir" sm3 to_harness)" = codex ] \
     || fail "a secondmate relaunch should pick up the configured harness pin, got '$(journal_field "$dir" sm3 to_harness)'"
   [ "$(journal_field "$dir" sm3 to_model)" = some-model ] \
@@ -357,6 +381,43 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
     || fail "the configured effort token should come with the pin"
   assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
+}
+
+test_explicit_secondmate_harness_ignores_configured_profile_axes() {
+  local dir home out rc
+  dir=$(new_case smexplicit sm4)
+  home="$dir/home"
+  mkdir -p "$home/config"
+  printf 'claude opus high\n' > "$home/config/secondmate-harness"
+  mkdir -p "$home/data/sm4"
+  printf '# secondmate brief\n' > "$home/data/sm4/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm4\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm4"
+    echo "endpoint_task_id=sm4"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=opus"
+    echo "effort=high"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm4.meta"
+  printf '%s\n' "fm-sm4" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" sm4 relaunch --harness codex); rc=$?
+  expect_code 0 "$rc" "an explicit secondmate harness should relaunch"$'\n'"$out"
+  [ "$(meta_field "$dir" sm4 model)" = default ] \
+    || fail "an explicit secondmate harness must not inherit the configured model"
+  [ "$(meta_field "$dir" sm4 effort)" = default ] \
+    || fail "an explicit secondmate harness must not inherit the configured effort"
+  pass "fm-control relaunch: explicit secondmate harness resets unnamed profile axes"
 }
 
 test_ship_relaunch_ignores_the_crew_harness_config() {
@@ -426,6 +487,30 @@ test_checkpoint_refusal_leaves_the_record_byte_identical() {
   pass "fm-control relaunch: a refusal before the agent is stopped leaves the durable record untouched"
 }
 
+test_checkpoint_refuses_uninspectable_head_and_status() {
+  local dir out rc real_git
+  real_git=$(command -v git)
+
+  dir=$(new_case badhead rl22)
+  add_ship_task "$dir" rl22 claude
+  make_git_failure_stub "$dir"
+  out=$(FM_REAL_GIT="$real_git" FM_FAKE_GIT_FAILURE=head \
+    run_control "$dir" rl22 relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "an uninspectable HEAD should refuse"
+  assert_contains "$out" "HEAD cannot be inspected" "the refusal should name the failed HEAD proof"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "HEAD inspection failure must not stop the agent"
+
+  dir=$(new_case badstatus rl23)
+  add_ship_task "$dir" rl23 claude
+  make_git_failure_stub "$dir"
+  out=$(FM_REAL_GIT="$real_git" FM_FAKE_GIT_FAILURE=status \
+    run_control "$dir" rl23 relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "an uninspectable worktree status should refuse"
+  assert_contains "$out" "status cannot be inspected" "the refusal should name the failed dirty-state proof"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "status inspection failure must not stop the agent"
+  pass "fm-control relaunch: checkpoint inspection failures refuse before stopping"
+}
+
 # --- 5. failure after the agent is stopped -----------------------------------
 
 test_launch_failure_restores_the_prior_record_and_reports_it() {
@@ -449,6 +534,41 @@ test_launch_failure_restores_the_prior_record_and_reports_it() {
   assert_grep "carry this forward" "$dir/home/data/rl13/brief.md" \
     "the progress note must survive so a later recovery still has it"
   pass "fm-control relaunch: a launch failure after the stop restores the prior record and reports the real state"
+}
+
+test_post_publication_launch_failure_keeps_the_new_record() {
+  local dir out rc
+  dir=$(new_case published rl24)
+  add_ship_task "$dir" rl24 claude
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START=1 \
+    run_control "$dir" rl24 relaunch --harness codex --note "keep the published record"); rc=$?
+  expect_code 1 "$rc" "a post-publication launch failure should fail closed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl24 harness)" = codex ] \
+    || fail "a published replacement record must not be rewritten to the prior harness"
+  [ -n "$(meta_field "$dir" rl24 control_relaunch_tx)" ] \
+    || fail "the published replacement record should identify its relaunch transaction"
+  [ "$(journal_field "$dir" rl24 rollback)" = none-new-record-kept ] \
+    || fail "the journal should record that the published replacement record was kept"
+  pass "fm-control relaunch: post-publication failure keeps the new durable record"
+}
+
+test_stop_transport_failure_reconciles_a_dead_agent() {
+  local dir out rc
+  dir=$(new_case stopfail rl25)
+  add_ship_task "$dir" rl25 claude
+  out=$(FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP=1 \
+    run_control "$dir" rl25 relaunch --note "preserve this after stop"); rc=$?
+  expect_code 1 "$rc" "a stop transport failure should fail closed"$'\n'"$out"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "the fixture should stop the old agent before reporting transport failure"
+  [ "$(journal_field "$dir" rl25 phase)" = failed:stopping ] \
+    || fail "the journal should retain the pre-stop phase on a partial stop"
+  [ "$(journal_field "$dir" rl25 rollback)" = prior-record-restored-agent-dead ] \
+    || fail "rollback should reconcile the observed dead agent"
+  assert_contains "$out" "no agent is running" "the failure should report the reconciled dead state"
+  assert_grep "preserve this after stop" "$dir/home/data/rl25/brief.md" \
+    "the progress note should survive once the old agent has stopped"
+  pass "fm-control relaunch: partial stop reconciles actual agent state"
 }
 
 test_journal_records_the_checkpoint_it_proved() {
@@ -534,6 +654,44 @@ test_secondmate_relaunch_refuses_an_unmarked_home() {
   pass "fm-control relaunch: a secondmate home that is not this secondmate's is refused"
 }
 
+test_secondmate_checkpoint_refuses_unreadable_child_state() {
+  local dir home out rc
+  dir=$(new_case smchildren sm5)
+  home="$dir/home"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state/bad.meta"
+  printf 'sm5\n' > "$dir/smhome/.fm-secondmate-home"
+  {
+    echo "window=fmses:fm-sm5"
+    echo "endpoint_task_id=sm5"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm5.meta"
+  printf '%s\n' "fm-sm5" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  out=$(run_control "$dir" sm5 relaunch); rc=$?
+  expect_code 1 "$rc" "a non-readable child record should refuse"
+  assert_contains "$out" "not a readable regular file" "the refusal should name the unreadable child record"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "child record failure must not stop the secondmate"
+  rmdir "$dir/smhome/state/bad.meta"
+  cat > "$dir/fakebin/find" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$dir/fakebin/find"
+  out=$(run_control "$dir" sm5 relaunch); rc=$?
+  expect_code 1 "$rc" "failed child-state traversal should refuse"
+  assert_contains "$out" "child records cannot be traversed" \
+    "the refusal should preserve a find traversal failure"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "child traversal failure must not stop the secondmate"
+  pass "fm-control relaunch: unreadable and untraversable child state fails checkpoint"
+}
+
 test_concurrent_relaunch_is_refused() {
   local dir out rc lock holder i
   dir=$(new_case lock rl19)
@@ -558,11 +716,38 @@ test_concurrent_relaunch_is_refused() {
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
   expect_code 1 "$rc" "a second concurrent control action should refuse"
-  assert_contains "$out" "another control action is already running" \
+  assert_contains "$out" "another lifecycle action is already running" \
     "the refusal should name the concurrent action"
   [ "$(cat "$dir/fake/command")" = claude ] \
     || fail "a refused concurrent relaunch must not stop the agent"
   pass "fm-control relaunch: two control actions on one task serialize instead of interleaving"
+}
+
+test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
+  local dir out rc lock holder i=0
+  dir=$(new_case spawnlock rl26)
+  add_ship_task "$dir" rl26 claude
+  printf 'zsh' > "$dir/fake/command"
+  lock="$dir/home/state/.control-rl26.lock"
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    sleep 30
+  ) &
+  holder=$!
+  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$lock" ] || fail "could not stage the lifecycle lock"
+  out=$(run_spawn "$dir" rl26 --relaunch --harness claude); rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 1 "$rc" "direct relaunch spawn should refuse a held lifecycle lock"
+  assert_contains "$out" "another lifecycle action is already running" \
+    "direct relaunch spawn should name lifecycle contention"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "contended direct relaunch spawn must deliver no launch bytes"
+  pass "fm-spawn relaunch: direct entry participates in lifecycle serialization"
 }
 
 # --- 6. fm-spawn --relaunch's own refusals -----------------------------------
@@ -628,16 +813,22 @@ test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
+test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
+test_checkpoint_refuses_uninspectable_head_and_status
 test_launch_failure_restores_the_prior_record_and_reports_it
+test_post_publication_launch_failure_keeps_the_new_record
+test_stop_transport_failure_reconciles_a_dead_agent
 test_journal_records_the_checkpoint_it_proved
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home
+test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
+test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
