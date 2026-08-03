@@ -844,9 +844,11 @@ test_journal_records_the_checkpoint_it_proved() {
 # --- secondmate child-work safety -------------------------------------------
 
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter() {
-  local dir home out
+  local dir home out rc
   dir=$(new_case sm sm1)
   home="$dir/home"
+  mkdir -p "$home/config"
+  printf 'claude\n' > "$home/config/secondmate-harness"
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sm1\n' > "$dir/smhome/.fm-secondmate-home"
@@ -872,7 +874,8 @@ test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter() {
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   # No --note: a secondmate reconciles its own home's records at startup, so
   # the note is optional there.
-  out=$(run_control "$dir" sm1 relaunch)
+  out=$(run_control "$dir" sm1 relaunch); rc=$?
+  expect_code 0 "$rc" "a checkpointed secondmate should relaunch"$'\n'"$out"
   [ "$(journal_field "$dir" sm1 children)" = 2 ] \
     || fail "the checkpoint must account for the secondmate's child work, got '$(journal_field "$dir" sm1 children)'"
   assert_not_contains "$out" "requires --note" "a secondmate relaunch must not demand a progress note"
