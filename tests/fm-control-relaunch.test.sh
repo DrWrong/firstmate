@@ -890,6 +890,8 @@ test_secondmate_relaunch_refuses_an_unmarked_home() {
   local dir home out rc
   dir=$(new_case smbad sm2)
   home="$dir/home"
+  mkdir -p "$home/config"
+  printf 'claude\n' > "$home/config/secondmate-harness"
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state"
   printf 'someone-else\n' > "$dir/smhome/.fm-secondmate-home"
@@ -916,6 +918,8 @@ test_secondmate_checkpoint_refuses_unreadable_child_state() {
   local dir home out rc
   dir=$(new_case smchildren sm5)
   home="$dir/home"
+  mkdir -p "$home/config"
+  printf 'claude\n' > "$home/config/secondmate-harness"
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state/bad.meta"
   printf 'sm5\n' > "$dir/smhome/.fm-secondmate-home"
