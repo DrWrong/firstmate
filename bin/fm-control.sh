@@ -35,9 +35,17 @@
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. Records a durable checkpoint and the required
-#              progress note, exits the old agent, then delegates the launch to
-#              its single owner, bin/fm-spawn.sh --relaunch. A failure before
+#              of this verb. With no explicit axis, a secondmate re-resolves its
+#              durable config/secondmate-harness pin (harness plus its optional
+#              model and effort tokens) exactly as any other respawn does, while
+#              a ship or scout keeps the harness already recorded for it.
+#              --note is required for a ship or scout, whose replacement
+#              inherits the local copy but none of the conversation; a
+#              secondmate reconciles its own home's records at startup, so its
+#              standing charter is never rewritten.
+#              Records a durable checkpoint and that note, exits the old agent,
+#              then delegates the launch to its single owner,
+#              bin/fm-spawn.sh --relaunch. A failure before
 #              the new agent is running restores the prior durable record and
 #              reports the concrete state; it never leaves a half-transitioned
 #              task claiming to be running.
