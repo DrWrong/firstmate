@@ -422,14 +422,14 @@ test_hook_uses_state_override() {
   pass "fm-turnend-guard: uses FM_STATE_OVERRIDE ahead of FM_HOME/state"
 }
 
-test_hook_loop_guard_allows_retry() {
+test_hook_codex_continuation_rechecks_supervision() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-loopguard")
   : > "$dir/state/task1.meta"
   out=$(run_hook "$dir" true); status=$?
-  expect_code 0 "$status" "hook must allow the stop when stop_hook_active is already true"
-  [ -z "$out" ] || fail "hook produced output on the loop-guarded retry: $out"
-  pass "fm-turnend-guard: stop_hook_active=true always allows the stop (never blocks twice in one turn)"
+  expect_code 2 "$status" "Codex continuation must re-check supervision when stop_hook_active is true"
+  assert_contains "$out" "$REQUIRED_REASON" "Codex continuation lost the recovery instruction"
+  pass "fm-turnend-guard: Codex stop_hook_active continuation re-checks the live supervision predicate"
 }
 
 # A secondmate's OWN home runs a primary firstmate session and must be guarded
@@ -459,17 +459,17 @@ test_hook_silent_in_idle_secondmate_home() {
   pass "fm-turnend-guard: idle-by-default - silent in a secondmate home with nothing in flight"
 }
 
-# The stop_hook_active loop guard bounds the secondmate to one forced
-# continuation per turn, exactly as it does for the main primary - no wedged,
-# un-endable session.
-test_hook_secondmate_loop_guard_allows_retry() {
+# A Codex secondmate primary must apply the same recovery-proof rule as the main
+# primary: stop_hook_active records a continuation but cannot substitute for a
+# live foreground checkpoint while its own child work remains in flight.
+test_hook_secondmate_codex_continuation_rechecks_supervision() {
   local dir out status
   dir=$(make_secondmate_dir "$TMP_ROOT/hook-secondmate-loopguard")
   : > "$dir/state/task1.meta"
   out=$(run_hook "$dir" true); status=$?
-  expect_code 0 "$status" "hook must allow the stop in a secondmate home when stop_hook_active is already true"
-  [ -z "$out" ] || fail "secondmate loop-guarded retry produced output: $out"
-  pass "fm-turnend-guard: stop_hook_active=true allows the stop in a secondmate home (never blocks twice in one turn)"
+  expect_code 2 "$status" "Codex continuation must re-check supervision in a secondmate home"
+  assert_contains "$out" "$REQUIRED_REASON" "secondmate Codex continuation lost the recovery instruction"
+  pass "fm-turnend-guard: secondmate Codex continuation re-checks the live supervision predicate"
 }
 
 # The guard's half of the deferred-death recovery loop in a secondmate home,
@@ -1555,10 +1555,10 @@ test_hook_x_mode_reason_sources_cadence
 test_hook_x_mode_only_blocks_in_default_mode
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
-test_hook_loop_guard_allows_retry
+test_hook_codex_continuation_rechecks_supervision
 test_hook_blocks_in_secondmate_own_home
 test_hook_silent_in_idle_secondmate_home
-test_hook_secondmate_loop_guard_allows_retry
+test_hook_secondmate_codex_continuation_rechecks_supervision
 test_hook_secondmate_reinvoke_recovery_loop
 test_hook_silent_in_secondmate_child_worktree
 test_hook_blocks_in_treehouse_leased_secondmate_home
