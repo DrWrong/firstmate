@@ -445,6 +445,43 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
+# Make Treehouse expose one managed path through its public status/enter
+# interface while refusing every return path except that exact string.
+# Args: case_dir managed_path
+add_exact_path_treehouse() {
+  local case_dir=$1 managed_path=$2
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  status)
+    printf '%-4s  %-11s  %s\n' 1 available '$managed_path'
+    exit 0
+    ;;
+  enter)
+    if [ "\${2:-}" = --print-path ] && [ "\${3:-}" = 1 ]; then
+      printf '%s\n' '$managed_path'
+      exit 0
+    fi
+    exit 1
+    ;;
+  return)
+    candidate=
+    for arg in "\$@"; do
+      case "\$arg" in return|--force) ;; *) candidate=\$arg ;; esac
+    done
+    printf 'return:%s\n' "\$candidate" >> '$case_dir/treehouse.log'
+    if [ "\$candidate" = '$managed_path' ]; then
+      exit 0
+    fi
+    printf 'worktree %s is not managed by treehouse\n' "\$candidate" >&2
+    exit 1
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
 git_index_lock_path() {
   local dir=$1 lock abs_dir
   lock=$(git -C "$dir" rev-parse --git-path index.lock)
@@ -1219,6 +1256,50 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
   [ -f "$case_dir/state/task-x1.meta" ] \
     || fail "persistent-index-lock: teardown completed despite persistent lock"
   pass "persistent index.lock exhausts retries and refuses without force-removing the lock"
+}
+
+test_treehouse_equivalent_path_alias_is_returned_by_managed_identity() {
+  local case_dir managed_alias rc
+  case_dir=$(make_case treehouse-equivalent-path-alias)
+  write_meta "$case_dir" no-mistakes ship
+  ln -s "$case_dir" "$case_dir/alias-root"
+  managed_alias="$case_dir/alias-root/wt"
+  add_exact_path_treehouse "$case_dir" "$managed_alias"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "treehouse-equivalent-path-alias: teardown should return the exact managed alias"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "treehouse-equivalent-path-alias: teardown left task metadata after the managed return"
+  assert_grep "return:$case_dir/wt" "$case_dir/treehouse.log" \
+    "treehouse-equivalent-path-alias: teardown did not reproduce the raw-path refusal first"
+  assert_grep "return:$managed_alias" "$case_dir/treehouse.log" \
+    "treehouse-equivalent-path-alias: teardown did not retry the identity-proven managed path"
+  assert_grep "same directory identity" "$case_dir/stderr" \
+    "treehouse-equivalent-path-alias: teardown did not explain its alias recovery"
+  pass "treehouse-managed symlink alias is returned only after exact directory-identity proof"
+}
+
+test_treehouse_non_equivalent_path_alias_still_refuses() {
+  local case_dir unrelated rc
+  case_dir=$(make_case treehouse-non-equivalent-path-alias)
+  write_meta "$case_dir" no-mistakes ship
+  unrelated="$case_dir/unrelated"
+  mkdir -p "$unrelated"
+  add_exact_path_treehouse "$case_dir" "$unrelated"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "treehouse-non-equivalent-path-alias: teardown must refuse a different directory"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "treehouse-non-equivalent-path-alias: refusal erased task metadata"
+  [ "$(wc -l < "$case_dir/treehouse.log" | tr -d '[:space:]')" = 1 ] \
+    || fail "treehouse-non-equivalent-path-alias: teardown retried a non-equivalent managed path"
+  assert_not_contains "$(cat "$case_dir/treehouse.log")" "$unrelated" \
+    "treehouse-non-equivalent-path-alias: teardown broadened cleanup to a different directory"
+  pass "treehouse-managed lexical similarity never authorizes a different directory"
 }
 
 test_empty_retry_wait_uses_default_without_aborting() {
@@ -2536,6 +2617,8 @@ test_non_linked_index_lock_path_is_checked_from_worktree
 test_index_lock_mtime_read_failure_refuses
 test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
+test_treehouse_equivalent_path_alias_is_returned_by_managed_identity
+test_treehouse_non_equivalent_path_alias_still_refuses
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown

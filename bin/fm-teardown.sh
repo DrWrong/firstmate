@@ -87,6 +87,18 @@
 # checks before any destructive return. Teardown output notes every wait, retry, and
 # removal so the operator can see what happened.
 #
+# Treehouse path-alias recovery is owned by teardown_treehouse_return.
+# Treehouse 2.0.1 and 2.1.1 compare a return path byte-for-byte with their managed
+# path, while a backend cwd probe can report the same directory through a physical
+# symlink or bind-mount path.
+# Only after Treehouse returns its exact unmanaged-path error does teardown enumerate
+# public `treehouse status` slot names and resolve each through
+# `treehouse enter --print-path`.
+# It retries exactly one managed path only when Bash `test -ef` proves that existing
+# directory has the same device and inode as the already-inspected worktree.
+# Missing, changed, non-equivalent, or multiply-matched paths still refuse without
+# weakening dirty-work or landed-work checks.
+#
 # Pre-teardown cleanup sequence (runs once every landed/discard-work safety
 # refusal above has already passed, and BEFORE any worktree return, branch
 # delete, or backend kill below - a still-active run or a leaked process may
@@ -949,6 +961,50 @@ treehouse_return_is_index_lock_error() {
   printf '%s\n' "$text" | grep -Eq "Unable to create ['\"].*index\\.lock['\"]: File exists"
 }
 
+treehouse_return_is_unmanaged_error() {
+  local text=$1 dir=$2
+  printf '%s\n' "$text" | grep -Fq "worktree $dir is not managed by treehouse"
+}
+
+# Resolve Treehouse's exact managed spelling for an existing directory.
+# `test -ef` compares the followed directory device and inode, so it accepts both
+# symlink-prefix and bind-mount aliases without accepting lexical resemblance.
+# The public status/enter interface exists in the pinned Treehouse 2.0.1 build.
+TREEHOUSE_MANAGED_RETURN_PATH=
+treehouse_managed_return_path_for_identity() {  # <recorded-dir> <project-dir>
+  local dir=$1 cd_dir=$2 status line name candidate matches=0 matched=
+  TREEHOUSE_MANAGED_RETURN_PATH=
+  [ -d "$dir" ] || return 1
+  status=$( ( cd "$cd_dir" && treehouse status ) 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      ''|[[:space:]]*) continue ;;
+    esac
+    name=${line%%[[:space:]]*}
+    case "$name" in
+      ''|*[!A-Za-z0-9._-]*) continue ;;
+    esac
+    candidate=$( ( cd "$cd_dir" && treehouse enter --print-path "$name" ) 2>/dev/null) || continue
+    case "$candidate" in
+      /*) ;;
+      *) continue ;;
+    esac
+    case "$candidate" in
+      *$'\n'*|*$'\r'*|*$'\t'*) continue ;;
+    esac
+    [ "$candidate" != "$dir" ] || continue
+    [ -d "$candidate" ] || continue
+    if [ "$candidate" -ef "$dir" ]; then
+      matches=$((matches + 1))
+      matched=$candidate
+    fi
+  done <<EOF
+$status
+EOF
+  [ "$matches" -eq 1 ] || return 1
+  TREEHOUSE_MANAGED_RETURN_PATH=$matched
+}
+
 # Absolute path to the git index lock for a worktree/repo dir, or empty when it
 # cannot be resolved (dir missing or not a git worktree at all).
 worktree_git_lock_path() {
@@ -1005,13 +1061,32 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local out lock attempt=0 max_retries lock_desc managed_dir
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
   if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
+  fi
+  if treehouse_return_is_unmanaged_error "$out" "$dir"; then
+    if ! treehouse_managed_return_path_for_identity "$dir" "$cd_dir"; then
+      [ -n "$out" ] && printf '%s\n' "$out" >&2
+      echo "REFUSED: Treehouse rejected recorded $label path $dir and did not expose exactly one managed path with the same directory identity; preserving task state." >&2
+      return 1
+    fi
+    managed_dir=$TREEHOUSE_MANAGED_RETURN_PATH
+    if [ ! -d "$dir" ] || [ ! -d "$managed_dir" ] || [ ! "$managed_dir" -ef "$dir" ]; then
+      [ -n "$out" ] && printf '%s\n' "$out" >&2
+      echo "REFUSED: recorded $label path $dir or Treehouse-managed path $managed_dir changed during identity verification; preserving task state." >&2
+      return 1
+    fi
+    echo "teardown: recorded $label path $dir and Treehouse-managed path $managed_dir have the same directory identity; retrying the exact managed path" >&2
+    dir=$managed_dir
+    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      [ -n "$out" ] && printf '%s\n' "$out"
+      return 0
+    fi
   fi
   [ -n "$out" ] && printf '%s\n' "$out" >&2
 
