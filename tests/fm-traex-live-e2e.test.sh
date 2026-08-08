@@ -172,6 +172,9 @@ harness=traex
 model=$MODEL
 effort=low
 kind=crew
+traex_os_home=$HOME
+traex_home=$TRAE_HOME
+traex_cli_home=$TRAECLI_HOME
 busy_gen=$GEN
 EOF
 fm_traex_snapshot_write "$STATE" live || fail "could not snapshot the real receipt"

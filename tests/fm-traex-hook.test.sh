@@ -55,6 +55,13 @@ case "${1:-}" in
     exit 0
     ;;
   exec)
+    if [ -n "${FM_TEST_TRAEX_EXEC_BLOCK_DIR:-}" ]; then
+      printf '%s\n' "$PWD" > "$FM_TEST_TRAEX_EXEC_BLOCK_DIR/project"
+      while [ ! -e "$FM_TEST_TRAEX_EXEC_BLOCK_DIR/release" ]; do
+        sleep 0.05
+      done
+      exit 91
+    fi
     command=$(jq -r '.hooks.SessionStart[-1].hooks[0].command' "$TRAECLI_HOME/hooks.json")
     session=sess-probe-1
     turn=turn-probe-1
@@ -82,6 +89,7 @@ setup_adapter() {  # <name>
   cli_home="$case_dir/cli"
   fakebin=$(make_fake_cli "$case_dir")
   mkdir -p "$cli_home"
+  chmod 750 "$cli_home"
   printf '%s\n' '{"version":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"printf user-hook","timeout":7}]}]}}' \
     > "$cli_home/hooks.json"
   TRAECLI_HOME="$cli_home" PATH="$fakebin:$PATH" \
@@ -118,7 +126,7 @@ file_mode() {
 }
 
 test_install_merge_probe_and_preflight() {
-  local rec case_dir cli_home fakebin config out hooks_mode hooks_sha external managed_command count event
+  local rec case_dir cli_home fakebin config out hooks_mode hooks_sha external managed_command count event new_cli
   rec=$(setup_adapter install) || fail "install setup failed"
   IFS='|' read -r case_dir cli_home fakebin <<EOF
 $rec
@@ -131,6 +139,12 @@ EOF
       "$cli_home/hooks.json" >/dev/null || fail "installer omitted managed $event hook"
   done
   assert_present "$cli_home/fm-firstmate-receipt.json" "trusted probe did not create a receipt"
+  [ "$(file_mode "$cli_home")" = 750 ] || fail "install changed the existing TRAECLI_HOME mode"
+  new_cli="$case_dir/new-cli"
+  TRAECLI_HOME="$new_cli" PATH="$fakebin:$PATH" \
+    FM_TEST_TRAEX_SHA="$SUPPORTED_SHA" FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" \
+    "$INSTALL" install >/dev/null || fail "install could not create a private TRAECLI_HOME"
+  [ "$(file_mode "$new_cli")" = 700 ] || fail "new TRAECLI_HOME was not created with mode 0700"
 
   managed_command=$(jq -r '[.. | objects | .command? | select(type == "string" and contains("fm-firstmate-hook.sh"))][0]' \
     "$cli_home/hooks.json")
@@ -226,6 +240,46 @@ EOF
   [ -z "$(find "$external" -mindepth 1 -maxdepth 1 -print -quit)" ] \
     || fail "unsafe-registry refusal wrote through the symlink"
   pass "TraeX installer merge-preserves user hooks and receipt/model/effort/role preflight fails closed"
+}
+
+test_interrupted_probe_cleans_binding_and_preserves_evidence() {
+  local rec case_dir cli_home fakebin block pid status project lab token record tries=0
+  rec=$(setup_adapter interrupted-probe) || fail "interrupted probe setup failed"
+  IFS='|' read -r case_dir cli_home fakebin <<EOF
+$rec
+EOF
+  block="$case_dir/block"
+  mkdir -p "$block"
+  TRAECLI_HOME="$cli_home" PATH="$fakebin:$PATH" FM_TEST_TRAEX_EXEC_BLOCK_DIR="$block" \
+    FM_TEST_TRAEX_SHA="$SUPPORTED_SHA" FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" \
+    "$INSTALL" probe --model GPT-5.6-Luna > "$case_dir/probe.out" 2> "$case_dir/probe.err" &
+  pid=$!
+  while [ ! -s "$block/project" ] && [ "$tries" -lt 200 ]; do
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+  [ -s "$block/project" ] || { kill -TERM "$pid" 2>/dev/null || true; fail "blocking probe did not publish its project"; }
+  project=$(cat "$block/project")
+  lab=${project%/project}
+  token=$(sed -n 's/^token=//p' "$project/.fm-traex-hook")
+  record="$cli_home/fm-firstmate-hooks.d/$token"
+  assert_present "$record" "probe did not publish its registry binding before execution"
+  assert_present "$lab/state/probe-token" "probe did not publish its token state before execution"
+  kill -TERM "$pid" || fail "could not interrupt the blocking probe"
+  touch "$block/release"
+  if wait "$pid"; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "interrupted probe exited successfully"
+  assert_absent "$record" "interrupted probe left its registry binding"
+  assert_absent "$lab/state/probe-token" "interrupted probe left its token state"
+  assert_absent "$project/.fm-traex-hook" "interrupted probe left its worktree pointer"
+  assert_present "$lab/traex.err" "interrupted probe discarded its diagnostic evidence"
+  case "$lab" in /tmp/fm-traex-receipt.*) ;; *) fail "probe evidence path escaped its disposable namespace" ;; esac
+  rm -rf "$lab"
+  pass "Interrupted TraeX probe removes active binding and preserves evidence"
 }
 
 test_library_owned_binary_pin_renders_dispatcher() {
@@ -506,6 +560,7 @@ SH
 }
 
 test_install_merge_probe_and_preflight
+test_interrupted_probe_cleans_binding_and_preserves_evidence
 test_library_owned_binary_pin_renders_dispatcher
 test_worker_scope_busy_completion_and_failure_visibility
 test_primary_session_start_and_stop_guard

@@ -258,13 +258,27 @@ EOF
     fail "non-tmux TraeX refusal created an endpoint"
   fi
 
-  out=$(TRAECLI_HOME="$cli_home" PATH="$fakebin:$PATH" FM_TEST_TRAEX_SHA="$SUPPORTED_SHA" \
+  out=$(HOME="$TMP_ROOT/wrong-os-home" TRAE_HOME="$TMP_ROOT/wrong-trae-home" \
+    TRAECLI_HOME="$TMP_ROOT/wrong-cli-home" PATH="$fakebin:$PATH" FM_TEST_TRAEX_SHA="$SUPPORTED_SHA" \
     FM_TEST_CLASSIFY_NO_BINARY_HASH=1 \
     FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" bash -c \
     '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux firstmate:fm-traex-task traex traex-task "$2"' \
     _ "$ROOT" "$home/state")
   [ "$out" = 'busy fm-spawn' ] \
-    || fail "valid TraeX snapshot did not trust its semantic state without rehashing the binary: $out"
+    || fail "valid TraeX snapshot adopted ambient roots or rehashed the binary: $out"
+  sed "s|^traex_cli_home=.*|traex_cli_home=$TMP_ROOT/wrong-cli-home|" \
+    "$home/state/traex-task.meta" > "$home/state/traex-task.meta.changed"
+  mv "$home/state/traex-task.meta.changed" "$home/state/traex-task.meta"
+  out=$(HOME="$TMP_ROOT/wrong-os-home" TRAE_HOME="$TMP_ROOT/wrong-trae-home" \
+    TRAECLI_HOME="$TMP_ROOT/wrong-cli-home" PATH="$fakebin:$PATH" FM_TEST_TRAEX_SHA="$SUPPORTED_SHA" \
+    FM_TEST_CLASSIFY_NO_BINARY_HASH=1 FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" bash -c \
+    '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify tmux firstmate:fm-traex-task traex traex-task "$2"' \
+    _ "$ROOT" "$home/state")
+  [ "$out" = 'unknown traex-unverified' ] \
+    || fail "task metadata root drift did not fail semantic state closed: $out"
+  sed "s|^traex_cli_home=.*|traex_cli_home=$cli_home|" \
+    "$home/state/traex-task.meta" > "$home/state/traex-task.meta.changed"
+  mv "$home/state/traex-task.meta.changed" "$home/state/traex-task.meta"
   printf '\n' >> "$cli_home/hooks.json"
   out=$(TRAECLI_HOME="$cli_home" PATH="$fakebin:$PATH" FM_TEST_TRAEX_SHA="$SUPPORTED_SHA" \
     FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" bash -c \

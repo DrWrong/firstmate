@@ -136,7 +136,10 @@ fm_traex_snapshot_field() {  # <snapshot> <key>
 # binary drift turns an old idle record into unknown immediately.
 fm_traex_snapshot_write() {  # <state-dir> <task-id>
   local state=$1 id=$2 target tmp receipt hooks dispatcher binary verified_binary old_umask status
-  local receipt_sha hooks_sha dispatcher_sha binary_sha binary_identity identity_after
+  local os_home runtime_home cli_home receipt_sha hooks_sha dispatcher_sha binary_sha binary_identity identity_after
+  os_home=$(fm_traex_os_home) || return 1
+  runtime_home=$(fm_traex_runtime_home) || return 1
+  cli_home=$(fm_traex_cli_home) || return 1
   receipt=$(fm_traex_receipt_path) || return 1
   hooks=$(fm_traex_hooks_path) || return 1
   dispatcher=$(fm_traex_dispatcher_path) || return 1
@@ -166,6 +169,9 @@ fm_traex_snapshot_write() {  # <state-dir> <task-id>
   old_umask=$(umask); umask 077
   {
     printf 'protocol=%s\n' "$FM_TRAEX_ADAPTER_PROTOCOL"
+    printf 'traex_os_home=%s\n' "$os_home"
+    printf 'traex_home=%s\n' "$runtime_home"
+    printf 'traex_cli_home=%s\n' "$cli_home"
     printf 'receipt=%s\n' "$receipt"
     printf 'receipt_sha256=%s\n' "$receipt_sha"
     printf 'hooks=%s\n' "$hooks"
@@ -183,20 +189,30 @@ fm_traex_snapshot_write() {  # <state-dir> <task-id>
 }
 
 fm_traex_snapshot_valid() {  # <state-dir> <task-id>
-  local snapshot path expected key current identity
+  local snapshot meta path expected key identity os_home runtime_home cli_home
   snapshot=$(fm_traex_snapshot_path "$1" "$2")
   [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || return 1
+  meta=$1/$2.meta
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(fm_traex_snapshot_field "$snapshot" protocol 2>/dev/null)" = "$FM_TRAEX_ADAPTER_PROTOCOL" ] || return 1
+  os_home=$(fm_traex_snapshot_field "$snapshot" traex_os_home) || return 1
+  runtime_home=$(fm_traex_snapshot_field "$snapshot" traex_home) || return 1
+  cli_home=$(fm_traex_snapshot_field "$snapshot" traex_cli_home) || return 1
+  case "$os_home" in /*) ;; *) return 1 ;; esac
+  case "$runtime_home" in /*) ;; *) return 1 ;; esac
+  case "$cli_home" in /*) ;; *) return 1 ;; esac
+  [ "$os_home" = "$(fm_traex_snapshot_field "$meta" traex_os_home 2>/dev/null)" ] || return 1
+  [ "$runtime_home" = "$(fm_traex_snapshot_field "$meta" traex_home 2>/dev/null)" ] || return 1
+  [ "$cli_home" = "$(fm_traex_snapshot_field "$meta" traex_cli_home 2>/dev/null)" ] || return 1
   for key in receipt hooks dispatcher binary; do
     path=$(fm_traex_snapshot_field "$snapshot" "$key") || return 1
     case "$path" in /*) ;; *) return 1 ;; esac
     case "$key" in
-      receipt) current=$(fm_traex_receipt_path 2>/dev/null) || return 1 ;;
-      hooks) current=$(fm_traex_hooks_path 2>/dev/null) || return 1 ;;
-      dispatcher) current=$(fm_traex_dispatcher_path 2>/dev/null) || return 1 ;;
-      binary) current=$(fm_traex_binary 2>/dev/null) || return 1 ;;
+      receipt) [ "$path" = "$cli_home/fm-firstmate-receipt.json" ] || return 1 ;;
+      hooks) [ "$path" = "$cli_home/hooks.json" ] || return 1 ;;
+      dispatcher) [ "$path" = "$cli_home/fm-firstmate-hook.sh" ] || return 1 ;;
+      binary) ;;
     esac
-    [ "$path" = "$current" ] || return 1
     [ -f "$path" ] && [ ! -L "$path" ] || return 1
     expected=$(fm_traex_snapshot_field "$snapshot" "${key}_sha256") || return 1
     case "$expected" in *[!0-9a-f]*|'') return 1 ;; esac

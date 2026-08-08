@@ -84,6 +84,31 @@ token_new() {
   printf '%s-%s-%s-%s\n' "${hex:0:8}" "${hex:8:8}" "${hex:16:8}" "${hex:24:8}"
 }
 
+FM_TRAEX_PROBE_RECORD=
+FM_TRAEX_PROBE_TOKEN_STATE=
+FM_TRAEX_PROBE_POINTER=
+
+probe_binding_cleanup() {
+  local status=0
+  if [ -n "$FM_TRAEX_PROBE_RECORD" ]; then
+    rm -f -- "$FM_TRAEX_PROBE_RECORD" && FM_TRAEX_PROBE_RECORD= || status=1
+  fi
+  if [ -n "$FM_TRAEX_PROBE_TOKEN_STATE" ]; then
+    rm -f -- "$FM_TRAEX_PROBE_TOKEN_STATE" && FM_TRAEX_PROBE_TOKEN_STATE= || status=1
+  fi
+  if [ -n "$FM_TRAEX_PROBE_POINTER" ]; then
+    rm -f -- "$FM_TRAEX_PROBE_POINTER" && FM_TRAEX_PROBE_POINTER= || status=1
+  fi
+  return "$status"
+}
+
+probe_exit_cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
+  probe_binding_cleanup || true
+  exit "$status"
+}
+
 atomic_write() {  # <target> <source> <mode>
   local target=$1 source=$2 mode=$3 tmp
   tmp=$(mktemp "$(dirname -- "$target")/.${target##*/}.XXXXXXXX") || return 1
@@ -150,8 +175,8 @@ install_hook() {
     [ -d "$cli_home" ] && [ ! -L "$cli_home" ] || { printf 'fm-traex-hook-install: refused: TRAECLI_HOME is unsafe: %s\n' "$cli_home" >&2; return 1; }
   else
     mkdir -p "$cli_home" || return 1
+    chmod 700 "$cli_home" || return 1
   fi
-  chmod 700 "$cli_home" || return 1
   if [ -e "$dispatcher" ] || [ -L "$dispatcher" ]; then
     regular_owned "$dispatcher" || { printf 'fm-traex-hook-install: refused: dispatcher path is not an owned regular file: %s\n' "$dispatcher" >&2; return 1; }
     head -n 2 "$dispatcher" | grep -Fq 'Firstmate TraeX hook dispatcher.' || { printf 'fm-traex-hook-install: refused: dispatcher path has non-Firstmate content: %s\n' "$dispatcher" >&2; return 1; }
@@ -432,6 +457,12 @@ EOF
   token=$(token_new) || return 1
   token_state=$state/probe-token
   record=$registry/$token
+  FM_TRAEX_PROBE_RECORD=$record
+  FM_TRAEX_PROBE_TOKEN_STATE=$token_state
+  FM_TRAEX_PROBE_POINTER=$project/.fm-traex-hook
+  trap probe_exit_cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   umask 077
   {
     printf 'protocol=%s\n' "$FM_TRAEX_ADAPTER_PROTOCOL"
@@ -463,7 +494,10 @@ EOF
   else
     rc=$?
   fi
-  rm -f "$record" "$token_state" "$project/.fm-traex-hook"
+  if ! probe_binding_cleanup; then
+    printf 'error: TraeX receipt probe binding cleanup failed; evidence preserved at %s\n' "$lab" >&2
+    return 1
+  fi
   if [ "$rc" -ne 0 ]; then
     printf 'error: TraeX receipt probe exited %s; evidence preserved at %s\n' "$rc" "$lab" >&2
     return 1
@@ -500,6 +534,7 @@ EOF
     return 1
   fi
   rm -rf "$lab"
+  trap - EXIT INT TERM
   printf 'verified: native TraeX trust delivered all required lifecycle events; receipt=%s\n' "$receipt"
 }
 
