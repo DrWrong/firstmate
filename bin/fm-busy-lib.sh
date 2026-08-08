@@ -31,6 +31,8 @@
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
+#   traex-hook       TraeX trusted native hooks (UserPromptSubmit/Stop/SessionEnd),
+#                    gated by the per-task binary/config/dispatcher receipt snapshot
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -41,7 +43,7 @@
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, muse-session-log, missing,
 #   malformed, gen-mismatch, source-mismatch, kimi-unverified,
-#   codex-unverified, capture-failed, no-target
+#   codex-unverified, traex-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
@@ -79,6 +81,9 @@
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
 
 FM_BUSY_LIB_VERSION=v1
+
+# shellcheck source=bin/fm-traex-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-traex-lib.sh"
 
 # Standalone-Kimi verification gate. Empty means no installed Kimi version
 # has passed live verification, so every standalone Kimi task classifies
@@ -188,6 +193,7 @@ fm_busy_sources_for_harness() {  # <harness>
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'
       ;;
+    traex*) adapter=traex-hook ;;
     *) printf ''; return 0 ;;
   esac
   printf '%s fm-spawn fm-interrupt fm-recovery' "$adapter"
@@ -578,6 +584,15 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     codex*)
       if ! fm_busy_codex_semantic_source; then
         printf 'unknown codex-unverified'
+        return 0
+      fi
+      ;;
+    traex*)
+      # A TraeX task is armed only after the binary/config/dispatcher receipt
+      # preflight passes. Missing or malformed records remain unknown below;
+      # no rendered-pane fallback exists for this adapter.
+      if ! fm_traex_snapshot_valid "$state" "$id"; then
+        printf 'unknown traex-unverified'
         return 0
       fi
       ;;

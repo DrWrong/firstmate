@@ -60,6 +60,7 @@ The third is recorded below.
 | Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
 | Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
 | Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
+| TraeX | traecli 0.200.19 internal edition | `source=startup`, hook-only token quoted back in the TUI | Not separately credited for a context-reset source | `traex resume ... <session-id>` reports `source=resume` with the same native session id |
 
 Two harness-specific consequences are load-bearing rather than incidental.
 
@@ -133,6 +134,7 @@ tests/fm-startup-network.test.sh
 FM_SESSIONSTART_HOOK_LIVE_E2E=1 tests/fm-sessionstart-hook-live-e2e.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
+FM_TRAEX_LIVE_E2E=1 tests/fm-traex-live-e2e.test.sh
 ```
 
 `tests/fm-sessionstart-hook-live-e2e.test.sh` is the command that refreshes the table above; run it after every run-tier harness upgrade.
@@ -155,6 +157,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
+| TraeX | traecli 0.200.19 internal edition | Trusted native `UserPromptSubmit` / `Stop` / `SessionEnd` hooks | A real bound turn moved through busy to idle, persisted both completion callbacks, and changed to `unknown traex-unverified` under snapshot drift in the portable counterfactual. |
 
 Codex was probed two ways, both refused:
 
@@ -178,7 +181,7 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
+The original five direct and passive mechanisms were validated on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24. TraeX joined this matrix after its separate native-trust pass on 2026-08-08.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
@@ -187,8 +190,11 @@ The direct and passive mechanisms were validated across all five harnesses on 20
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
+| TraeX | traecli 0.200.19 internal edition | Native-trust-reviewed blocking `Stop` | Exit 2 delivered bounded feedback in the same turn; the repeated callback preserved the turn id and changed `stop_hook_active` from false to true with zero resume launches. |
 
 The Grok adaptive matrix ran on 2026-07-28 with separate scratch repositories and homes, dedicated tmux sockets, one target plus one control window, ambient tmux variables removed, and a socket-bound wrapper first in `PATH`.
+
+[`traex.md`](traex.md) records the 2026-08-08 TraeX binary identity, native trust boundary, isolated-home/tmux evidence, quoting-failure distinction, lifecycle payloads, TUI mechanics, and exact supported axes. It is the evidence owner for the TraeX rows above.
 
 ```sh
 FM_GROK_STOP_LIVE_E2E=1 \

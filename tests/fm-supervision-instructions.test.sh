@@ -160,6 +160,24 @@ test_grok_command_sources_effective_config() {
   pass "grok rendered command sources the effective x-mode config"
 }
 
+test_traex_is_foreground_checkpoint_with_native_stop_backstop() {
+  local home out ordinary
+  home="$TMP_ROOT/traex-home"
+  mkdir -p "$home/state" "$home/config"
+  out=$(FM_HOME="$home" FM_TRAEX_WATCH_CHECKPOINT=11 "$RENDER" --harness traex)
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: traex" "traex heading missing"
+  assert_contains "$out" "Mode: TraeX foreground checkpoint." "traex snippet missing"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds \"\${FM_TRAEX_WATCH_CHECKPOINT:-180}\"" "traex snippet lost its checkpoint knob"
+  assert_contains "$out" "native, trusted Stop hook is the backstop" "traex snippet lost its native Stop backstop"
+  assert_contains "$out" "Do not run \`bin/fm-watch-arm.sh\` as TraeX's normal supervision command" "traex snippet does not forbid a background arm"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "next foreground" "traex ordinary wake lost foreground checkpoint ownership"
+  out=$(FM_HOME="$home" FM_TRAEX_WATCH_CHECKPOINT=11 "$RENDER" --harness traex --repair-line)
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 11" "traex repair line ignored its checkpoint override"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "traex repair line selected a background arm"
+  pass "traex supervision uses foreground checkpoints with a native trusted Stop backstop"
+}
+
 test_pi_snippet_uses_effective_extension_path() {
   local home out turnend watch
   home="$TMP_ROOT/pi-home"
@@ -184,4 +202,5 @@ test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
+test_traex_is_foreground_checkpoint_with_native_stop_backstop
 test_pi_snippet_uses_effective_extension_path
