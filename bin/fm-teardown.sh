@@ -613,11 +613,18 @@ remove_kimi_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
-remove_traex_binding() {  # <state-dir> <id> <worktree-or-home>
-  local state_dir=$1 id=$2 worktree=$3 token_state
+remove_traex_binding() {  # <state-dir> <id> <worktree-or-home> <meta>
+  local state_dir=$1 id=$2 worktree=$3 meta=$4 token_state os_home trae_home cli_home recorded_home
   token_state=$state_dir/$id.traex-hook-token
   [ -e "$token_state" ] || [ -L "$token_state" ] || return 0
-  "$SCRIPT_DIR/fm-traex-hook-install.sh" unregister "$worktree" "$token_state"
+  os_home=$(fm_meta_get "$meta" traex_os_home)
+  trae_home=$(fm_meta_get "$meta" traex_home)
+  cli_home=$(fm_meta_get "$meta" traex_cli_home)
+  for recorded_home in "$os_home" "$trae_home" "$cli_home"; do
+    case "$recorded_home" in /*) ;; *) echo "error: TraeX binding for $id has an unsafe recorded identity root" >&2; return 1 ;; esac
+  done
+  HOME="$os_home" TRAE_HOME="$trae_home" TRAECLI_HOME="$cli_home" \
+    "$SCRIPT_DIR/fm-traex-hook-install.sh" unregister "$worktree" "$token_state"
 }
 
 retire_busy_state() {
@@ -2033,6 +2040,7 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
     fi
+    remove_traex_binding "$sub_state" "$child_id" "$child_wt" "$child_meta" || return 1
     if [ -n "$child_t" ]; then
       if [ "$child_backend" = herdr ]; then
         fm_backend_herdr_parse_target "$child_t" || return 1
@@ -2088,7 +2096,6 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_kimi_turnend_auth "$sub_state" "$child_id"
-    remove_traex_binding "$sub_state" "$child_id" "$child_wt" || return 1
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     child_busy_gen=$(meta_value "$child_meta" busy_gen)
     if [ -z "$child_busy_gen" ]; then
@@ -2244,6 +2251,8 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
 
+remove_traex_binding "$STATE" "$ID" "$WT" "$META" || exit 1
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -2368,7 +2377,6 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
-remove_traex_binding "$STATE" "$ID" "$WT" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.

@@ -159,7 +159,9 @@ install_hook() {
     | .hooks = (.hooks // {})
     | {hooks:[{type:"command",command:$command,timeout:180}]} as $managed
     | reduce ["SessionStart","UserPromptSubmit","Stop","SessionEnd"][] as $event
-        (. ; .hooks[$event] = (((.hooks[$event] // []) | map(select(. != $managed))) + [$managed]))
+        (. ; .hooks[$event] = (((.hooks[$event] // [])
+          | map(.hooks |= map(select((type != "object") or (.command? != $command))))
+          | map(select((.hooks | length) > 0))) + [$managed]))
   ' "$existing" > "$candidate" || { rm -rf "$work"; return 1; }
   validate_hooks_json "$candidate" || { rm -rf "$work"; return 1; }
   cp "$source" "$source_tmp" || { rm -rf "$work"; return 1; }
@@ -204,7 +206,7 @@ supported_material() {  # prints: binary|binary-sha|hooks-sha|dispatcher-sha
 register_binding() {  # <role> <task> <worktree> <state> <root> <home> <gen|-> <token-state>
   local role=$1 task=$2 worktree=$3 state=$4 root=$5 home=$6 gen=$7 token_state=$8
   local cli_home registry worktree_real state_real root_real home_real token_state_dir token_state_name
-  local token record pointer tmp old_umask exclude
+  local token record pointer tmp token_tmp pointer_tmp old_umask exclude token_published=0 pointer_published=0 record_published=0
   case "$role" in worker|primary) ;; *) printf 'error: invalid TraeX binding role\n' >&2; return 1 ;; esac
   case "$task" in ''|*[!A-Za-z0-9._-]*) printf 'error: invalid TraeX binding task id\n' >&2; return 1 ;; esac
   worktree_real=$(real_dir "$worktree") || return 1
@@ -227,6 +229,12 @@ register_binding() {  # <role> <task> <worktree> <state> <root> <home> <gen|-> <
   fi
   fm_traex_receipt_verify >/dev/null || return 1
   cli_home=$(fm_traex_cli_home) || return 1
+  exclude=$(git -C "$worktree_real" rev-parse --path-format=absolute --git-path info/exclude 2>/dev/null || true)
+  if [ -n "$exclude" ]; then
+    case "$exclude" in /*) ;; *) printf 'error: cannot resolve an absolute git exclude path for %s\n' "$worktree_real" >&2; return 1 ;; esac
+    mkdir -p "$(dirname -- "$exclude")" || return 1
+    grep -Fqx '.fm-traex-hook' "$exclude" 2>/dev/null || printf '.fm-traex-hook\n' >> "$exclude" || return 1
+  fi
   registry=$cli_home/fm-firstmate-hooks.d
   if [ -e "$registry" ] || [ -L "$registry" ]; then
     [ -d "$registry" ] && [ ! -L "$registry" ] && [ "$(owner_uid "$registry")" = "$(id -u)" ] \
@@ -253,8 +261,26 @@ register_binding() {  # <role> <task> <worktree> <state> <root> <home> <gen|-> <
     regular_owned "$pointer" || { printf 'error: unsafe TraeX worktree pointer: %s\n' "$pointer" >&2; return 1; }
     [ "$(cat "$pointer" 2>/dev/null)" = "token=$token" ] || { printf 'error: TraeX worktree pointer conflicts with this task\n' >&2; return 1; }
   fi
+  if [ -e "$token_state" ] || [ -L "$token_state" ]; then
+    [ "$(field "$record" protocol 2>/dev/null)" = "$FM_TRAEX_ADAPTER_PROTOCOL" ] \
+      && [ "$(field "$record" token 2>/dev/null)" = "$token" ] \
+      && [ "$(field "$record" role 2>/dev/null)" = "$role" ] \
+      && [ "$(field "$record" task_id 2>/dev/null)" = "$task" ] \
+      && [ "$(field "$record" busy_gen 2>/dev/null)" = "$gen" ] \
+      && [ "$(field "$record" worktree_real 2>/dev/null)" = "$worktree_real" ] \
+      && [ "$(field "$record" state_real 2>/dev/null)" = "$state_real" ] \
+      && [ "$(field "$record" fm_root_real 2>/dev/null)" = "$root_real" ] \
+      && [ "$(field "$record" fm_home_real 2>/dev/null)" = "$home_real" ] \
+      && [ "$(field "$record" uid 2>/dev/null)" = "$(id -u)" ] \
+      && [ "$(field "$record" adapter_version 2>/dev/null)" = "$FM_TRAEX_SUPPORTED_VERSION" ] \
+      && [ "$(field "$record" token_state_real 2>/dev/null)" = "$token_state" ] \
+      || { printf 'error: existing TraeX binding does not match the requested registration\n' >&2; return 1; }
+    return 0
+  fi
   old_umask=$(umask); umask 077
   tmp=$(mktemp "$registry/.fm-record.XXXXXXXX") || { umask "$old_umask"; return 1; }
+  token_tmp=$token_state.tmp.$$
+  pointer_tmp=$pointer.tmp.$$
   {
     printf 'protocol=%s\n' "$FM_TRAEX_ADAPTER_PROTOCOL"
     printf 'token=%s\n' "$token"
@@ -269,28 +295,46 @@ register_binding() {  # <role> <task> <worktree> <state> <root> <home> <gen|-> <
     printf 'adapter_version=%s\n' "$FM_TRAEX_SUPPORTED_VERSION"
     printf 'token_state_real=%s\n' "$token_state"
   } > "$tmp" || { rm -f "$tmp"; umask "$old_umask"; return 1; }
-  if ! chmod 600 "$tmp" || ! mv -f "$tmp" "$record"; then
-    rm -f "$tmp"
+  if ! chmod 600 "$tmp" \
+      || ! printf '%s\n' "$token" > "$token_tmp" \
+      || ! chmod 600 "$token_tmp" \
+      || ! printf 'token=%s\n' "$token" > "$pointer_tmp" \
+      || ! chmod 600 "$pointer_tmp"; then
+    rm -f "$tmp" "$token_tmp" "$pointer_tmp"
     umask "$old_umask"
     return 1
   fi
-  if ! printf '%s\n' "$token" > "$token_state.tmp.$$" \
-      || ! chmod 600 "$token_state.tmp.$$" \
-      || ! mv -f "$token_state.tmp.$$" "$token_state" \
-      || ! printf 'token=%s\n' "$token" > "$pointer.tmp.$$" \
-      || ! chmod 600 "$pointer.tmp.$$" \
-      || ! mv -f "$pointer.tmp.$$" "$pointer"; then
-    rm -f "$token_state.tmp.$$" "$pointer.tmp.$$"
+  if [ -e "$token_state" ] || [ -L "$token_state" ] \
+      || [ -e "$pointer" ] || [ -L "$pointer" ] \
+      || [ -e "$record" ] || [ -L "$record" ]; then
+    rm -f "$tmp" "$token_tmp" "$pointer_tmp"
     umask "$old_umask"
     return 1
   fi
+  if ln "$token_tmp" "$token_state"; then token_published=1; fi
+  if [ "$token_published" -eq 1 ] && ln "$pointer_tmp" "$pointer"; then pointer_published=1; fi
+  if [ "$pointer_published" -eq 1 ] && ln "$tmp" "$record"; then record_published=1; fi
+  if [ "$record_published" -ne 1 ]; then
+    [ "$pointer_published" -eq 0 ] || rm -f "$pointer"
+    [ "$token_published" -eq 0 ] || rm -f "$token_state"
+    rm -f "$tmp" "$token_tmp" "$pointer_tmp"
+    umask "$old_umask"
+    return 1
+  fi
+  rm -f "$tmp" "$token_tmp" "$pointer_tmp"
   umask "$old_umask"
-  exclude=$(git -C "$worktree_real" rev-parse --path-format=absolute --git-path info/exclude 2>/dev/null || true)
-  if [ -n "$exclude" ]; then
-    case "$exclude" in /*) ;; *) printf 'error: cannot resolve an absolute git exclude path for %s\n' "$worktree_real" >&2; return 1 ;; esac
-    mkdir -p "$(dirname -- "$exclude")" || return 1
-    grep -Fqx '.fm-traex-hook' "$exclude" 2>/dev/null || printf '.fm-traex-hook\n' >> "$exclude"
-  fi
+}
+
+require_current_tmux() {
+  local pane
+  [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] \
+    || { printf 'error: TraeX primary binding requires the current process to run inside tmux\n' >&2; return 1; }
+  command -v tmux >/dev/null 2>&1 \
+    || { printf 'error: TraeX primary binding requires tmux\n' >&2; return 1; }
+  pane=$(tmux display-message -p '#{pane_id}' 2>/dev/null) \
+    || { printf 'error: cannot verify the current tmux pane for TraeX primary binding\n' >&2; return 1; }
+  [ "$pane" = "$TMUX_PANE" ] \
+    || { printf 'error: TraeX primary binding tmux pane identity does not match the current process\n' >&2; return 1; }
 }
 
 unregister_binding() {  # <worktree> <token-state>
@@ -441,9 +485,11 @@ remove_hook() {
   work=$(mktemp -d "$cli_home/.fm-traex-remove.XXXXXXXX") || return 1
   candidate=$work/hooks.after
   jq --arg command "$command" '
-    {hooks:[{type:"command",command:$command,timeout:180}]} as $managed
-    | reduce ["SessionStart","UserPromptSubmit","Stop","SessionEnd"][] as $event
-        (. ; if .hooks[$event] then .hooks[$event] |= map(select(. != $managed)) else . end)
+    reduce ["SessionStart","UserPromptSubmit","Stop","SessionEnd"][] as $event
+        (. ; if .hooks[$event] then
+          .hooks[$event] |= (map(.hooks |= map(select((type != "object") or (.command? != $command))))
+            | map(select((.hooks | length) > 0)))
+        else . end)
   ' "$hooks" > "$candidate" || { rm -rf "$work"; return 1; }
   if [ -e "$dispatcher" ] || [ -L "$dispatcher" ]; then
     if ! regular_owned "$dispatcher" \
@@ -492,6 +538,7 @@ case "$action" in
     config=$home/config
     state=$(real_dir "$state") || { printf 'error: primary state directory is missing: %s\n' "$state" >&2; exit 1; }
     if [ "$action" = bind-primary ]; then
+      require_current_tmux || exit 1
       fm_traex_preflight "$config" primary >/dev/null || exit 1
       register_binding primary primary "$root" "$state" "$root" "$home" - "$state/.traex-primary-hook-token"
       printf 'bound: TraeX primary hook for %s\n' "$home"

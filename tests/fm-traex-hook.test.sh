@@ -118,7 +118,7 @@ file_mode() {
 }
 
 test_install_merge_probe_and_preflight() {
-  local rec case_dir cli_home fakebin config out hooks_mode hooks_sha external
+  local rec case_dir cli_home fakebin config out hooks_mode hooks_sha external managed_command count event
   rec=$(setup_adapter install) || fail "install setup failed"
   IFS='|' read -r case_dir cli_home fakebin <<EOF
 $rec
@@ -131,6 +131,32 @@ EOF
       "$cli_home/hooks.json" >/dev/null || fail "installer omitted managed $event hook"
   done
   assert_present "$cli_home/fm-firstmate-receipt.json" "trusted probe did not create a receipt"
+
+  managed_command=$(jq -r '[.. | objects | .command? | select(type == "string" and contains("fm-firstmate-hook.sh"))][0]' \
+    "$cli_home/hooks.json")
+  jq --arg command "$managed_command" '
+    .hooks.Stop |= map(
+      if any(.hooks[]; .command? == $command) then
+        .hooks = ((.hooks | map(if .command? == $command then .timeout = 7 else . end))
+          + [{type:"command",command:"printf preserved-sibling",timeout:9}])
+      else . end)
+  ' "$cli_home/hooks.json" > "$case_dir/hooks.modified"
+  mv "$case_dir/hooks.modified" "$cli_home/hooks.json"
+  run_adapter "$cli_home" "$fakebin" "$INSTALL" install >/dev/null \
+    || fail "reinstall over a modified managed entry failed"
+  for event in SessionStart UserPromptSubmit Stop SessionEnd; do
+    count=$(jq --arg event "$event" --arg command "$managed_command" \
+      '[.hooks[$event][] | .hooks[] | select(.command? == $command)] | length' \
+      "$cli_home/hooks.json")
+    [ "$count" = 1 ] || fail "reinstall left $count managed $event commands"
+    jq -e --arg event "$event" --arg command "$managed_command" \
+      'any(.hooks[$event][]; .hooks == [{type:"command",command:$command,timeout:180}])' \
+      "$cli_home/hooks.json" >/dev/null || fail "reinstall did not canonicalize $event"
+  done
+  jq -e 'any(.hooks.Stop[]; any(.hooks[]; .command? == "printf preserved-sibling"))' \
+    "$cli_home/hooks.json" >/dev/null || fail "reinstall discarded a user hook sharing the modified entry"
+  run_adapter "$cli_home" "$fakebin" "$INSTALL" probe --model GPT-5.6-Luna >/dev/null \
+    || fail "reinstall lifecycle probe failed"
 
   config="$case_dir/config"
   mkdir -p "$config"
@@ -203,7 +229,7 @@ EOF
 }
 
 test_worker_scope_busy_completion_and_failure_visibility() {
-  local rec case_dir cli_home fakebin state wt root home gen token token_state dispatcher out status lines
+  local rec case_dir cli_home fakebin state wt root home gen token token_state dispatcher out status lines badgit
   rec=$(setup_adapter worker) || fail "worker setup failed"
   IFS='|' read -r case_dir cli_home fakebin <<EOF
 $rec
@@ -223,6 +249,23 @@ EOF
     'window=fm:task-a' 'endpoint_task_id=task-a' "worktree=$wt" "project=$wt" \
     'harness=traex' 'kind=ship' "busy_gen=$gen" > "$state/task-a.meta"
   token_state="$state/task-a.traex-hook-token"
+  badgit="$case_dir/badgit"
+  mkdir -p "$badgit"
+  cat > "$badgit/git" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' relative/info/exclude
+SH
+  chmod +x "$badgit/git"
+  if TRAECLI_HOME="$cli_home" PATH="$badgit:$fakebin:$PATH" \
+      FM_TEST_TRAEX_SHA="$SUPPORTED_SHA" FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" \
+      "$INSTALL" register worker task-a "$wt" "$state" "$root" "$home" "$gen" "$token_state" \
+      >/dev/null 2>&1; then
+    fail "binding registration accepted an unresolved git exclude path"
+  fi
+  assert_absent "$token_state" "failed exclude preparation published token state"
+  assert_absent "$wt/.fm-traex-hook" "failed exclude preparation published a worktree pointer"
+  [ -z "$(find "$cli_home/fm-firstmate-hooks.d" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] \
+    || fail "failed exclude preparation published a registry record"
   run_adapter "$cli_home" "$fakebin" "$INSTALL" register worker task-a "$wt" "$state" "$root" "$home" "$gen" "$token_state" \
     || fail "worker binding registration failed"
   dispatcher="$cli_home/fm-firstmate-hook.sh"
@@ -264,6 +307,8 @@ EOF
 
   rm -f "$state/task-a.turn-ended"
   mkdir "$state/task-a.turn-ended"
+  payload UserPromptSubmit "$wt" sess-2 turn-2 | run_adapter "$cli_home" "$fakebin" "$dispatcher" \
+    || fail "could not restore semantic busy before completion failure"
   if out=$(payload Stop "$wt" sess-2 turn-2 | run_adapter "$cli_home" "$fakebin" "$dispatcher" 2>&1); then
     status=0
   else
@@ -271,6 +316,13 @@ EOF
   fi
   [ "$status" = 2 ] || fail "matching persistence failure returned $status, expected 2"
   assert_contains "$out" 'completion-write' "matching persistence failure did not identify its bounded stage"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" \
+    FM_TEST_TRAEX_SHA="$SUPPORTED_SHA" bash -c '. "$1"; fm_busy_record_read "$2" task-a' \
+    _ "$ROOT/bin/fm-busy-lib.sh" "$state")
+  case "$out" in
+    'busy traex-hook user-prompt-submit '*) ;;
+    *) fail "completion failure published idle before durable completion: $out" ;;
+  esac
   rmdir "$state/task-a.turn-ended" || fail "could not clear completion-failure fixture"
   token=$(cat "$token_state")
   run_adapter "$cli_home" "$fakebin" "$INSTALL" unregister "$wt" "$token_state" \
@@ -292,6 +344,8 @@ EOF
   primary="$case_dir/primary"
   state="$primary/state"
   mkdir -p "$primary/bin" "$primary/config" "$state"
+  git -C "$primary" init -q
+  printf '%s\n' 'worker=off' 'primary=on' 'secondmate=off' > "$primary/config/traex-adapter"
   cat > "$primary/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'SESSION_START_CONTEXT\n'
@@ -305,9 +359,26 @@ printf 'continue supervised work\n' >&2
 exit 2
 SH
   chmod +x "$primary/bin/fm-sessionstart-run.sh" "$primary/bin/fm-turnend-guard.sh"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'#{pane_id}'*) printf '%s\n' '%9' ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
   token_state="$state/.traex-primary-hook-token"
-  run_adapter "$cli_home" "$fakebin" "$INSTALL" register primary primary "$primary" "$state" "$primary" "$primary" - "$token_state" \
-    || fail "primary binding registration failed"
+  if out=$(env -u TMUX -u TMUX_PANE TRAECLI_HOME="$cli_home" PATH="$fakebin:$PATH" \
+      FM_TEST_TRAEX_SHA="$SUPPORTED_SHA" FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" \
+      "$INSTALL" bind-primary "$primary" "$primary" 2>&1); then
+    fail "primary binding succeeded outside tmux"
+  fi
+  assert_contains "$out" 'requires the current process to run inside tmux' \
+    "plain-terminal primary refusal did not identify the tmux boundary"
+  assert_absent "$token_state" "plain-terminal primary refusal published a token"
+  TMUX=fake TMUX_PANE=%9 run_adapter "$cli_home" "$fakebin" \
+    "$INSTALL" bind-primary "$primary" "$primary" >/dev/null \
+    || fail "tmux primary binding failed"
   dispatcher="$cli_home/fm-firstmate-hook.sh"
 
   out=$(payload SessionStart "$primary" primary-session turn-unused resume \

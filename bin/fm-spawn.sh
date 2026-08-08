@@ -906,6 +906,12 @@ case "$ARG3" in
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
+    case "$HARNESS" in
+      traex|traecli)
+        echo "error: TraeX raw launch commands are forbidden; select harness=traex so Firstmate can enforce the canonical binary, homes, flags, and native hook trust" >&2
+        exit 1
+        ;;
+    esac
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the

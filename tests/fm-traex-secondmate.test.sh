@@ -82,8 +82,10 @@ case "${1:-}" in
     case "$*" in
       *' resume -y '*)
         printf '%s\n' traex > "$FM_TEST_TMUX_MODE"
-        printf 'session_id=%s\nsource=resume\n' "$FM_TEST_SESSION_ID" \
-          > "$FM_TEST_SECONDMATE_HOME/state/.traex-primary-session"
+        if [ "${FM_TEST_SKIP_RESUME_CALLBACK:-0}" != 1 ]; then
+          printf 'session_id=%s\nsource=resume\n' "$FM_TEST_SESSION_ID" \
+            > "$FM_TEST_SECONDMATE_HOME/state/.traex-primary-session"
+        fi
         ;;
     esac
     ;;
@@ -174,7 +176,30 @@ EOF
   assert_contains "$launch" "TRAE_HOME='$parent/trae-runtime'" "resume adopted the ambient Trae home instead of recorded identity"
   assert_contains "$launch" "TRAECLI_HOME='$cli_home'" "resume adopted the ambient CLI home instead of recorded identity"
   assert_not_contains "$launch" '--dangerously-bypass-hook-trust' "resume bypassed native hook trust"
-  pass "TraeX local tmux secondmate launches with primary binding and resumes only its recorded session"
+
+  printf '%s\n' zsh > "${parent%/parent}/mode"
+  if out=$(FM_TEST_SKIP_RESUME_CALLBACK=1 FM_TRAEX_RESUME_CONFIRM_TRIES=1 \
+      run_env "$parent" "$sub" "$fakebin" "$cli_home" "$RESUME" traex-sm 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "resume accepted stale SessionStart evidence"
+  assert_contains "$out" 'was not confirmed by SessionStart(source=resume)' \
+    "stale resume refusal did not identify the missing fresh callback"
+
+  out=$(FM_TEARDOWN_GUARD_DONE=1 \
+    FM_TEST_AMBIENT_HOME="${parent%/parent}/wrong-home" \
+    FM_TEST_AMBIENT_TRAE_HOME="${parent%/parent}/wrong-trae" \
+    FM_TEST_AMBIENT_CLI_HOME="${parent%/parent}/wrong-cli" \
+    run_env "$parent" "$sub" "$fakebin" "$cli_home" \
+      "$ROOT/bin/fm-teardown.sh" traex-sm --force 2>&1)
+  status=$?
+  expect_code 0 "$status" "TraeX teardown under changed ambient roots failed: $out"
+  assert_absent "$record" "teardown left the binding in the recorded TraeX registry"
+  assert_absent "$parent/state/traex-sm.traex-hook-token" "teardown left parent binding authority"
+  assert_absent "$sub" "teardown did not remove the local secondmate home"
+  pass "TraeX local secondmate launch, fresh resume, and recorded-root teardown stay exact"
 }
 
 test_remote_route_refuses_before_remote_lifecycle() {

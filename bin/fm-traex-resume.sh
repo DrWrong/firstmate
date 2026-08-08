@@ -80,6 +80,10 @@ BINARY=$(fm_traex_preflight "$CONFIG" "$ROLE" "$MODEL" "$EFFORT") || exit 1
 [ -f "$SESSION_FILE" ] && [ ! -L "$SESSION_FILE" ] || { printf 'error: no safe TraeX session identity for %s\n' "$ID" >&2; exit 1; }
 SESSION_ID=$(session_field "$SESSION_FILE" session_id) || { printf 'error: malformed TraeX session identity for %s\n' "$ID" >&2; exit 1; }
 case "$SESSION_ID" in ''|*[!A-Za-z0-9._:-]*) printf 'error: unsafe TraeX session id for %s\n' "$ID" >&2; exit 1 ;; esac
+SESSION_IDENTITY_BEFORE=$(fm_traex_file_identity "$SESSION_FILE") \
+  || { printf 'error: cannot identify the existing TraeX session record for %s\n' "$ID" >&2; exit 1; }
+CONFIRM_TRIES=${FM_TRAEX_RESUME_CONFIRM_TRIES:-45}
+case "$CONFIRM_TRIES" in ''|*[!0-9]*|0) printf 'error: invalid TraeX resume confirmation attempts\n' >&2; exit 1 ;; esac
 
 COMMAND="env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS HOME=$(shell_quote "$TRAE_OS_HOME") TRAE_HOME=$(shell_quote "$TRAE_RUNTIME_HOME") TRAECLI_HOME=$(shell_quote "$TRAE_CLI_HOME") FM_TRAEX_HARNESS=traex $(shell_quote "$BINARY") resume -y --disable plugins --disable plugin_hooks $(model_flag "$MODEL")$(effort_flag "$EFFORT")$(shell_quote "$SESSION_ID")"
 if [ "$KIND" = secondmate ]; then
@@ -89,8 +93,9 @@ fm_backend_source tmux
 fm_backend_tmux_send_text_line "$TARGET" "$COMMAND" || { printf 'error: TraeX resume command could not be sent to %s\n' "$TARGET" >&2; exit 1; }
 
 i=0
-while [ "$i" -lt 45 ]; do
+while [ "$i" -lt "$CONFIRM_TRIES" ]; do
   if [ -f "$SESSION_FILE" ] \
+     && [ "$(fm_traex_file_identity "$SESSION_FILE" 2>/dev/null || true)" != "$SESSION_IDENTITY_BEFORE" ] \
      && [ "$(session_field "$SESSION_FILE" source 2>/dev/null || true)" = resume ] \
      && [ "$(session_field "$SESSION_FILE" session_id 2>/dev/null || true)" = "$SESSION_ID" ] \
      && [ "$(fm_backend_agent_state tmux "$TARGET")" = alive ]; then

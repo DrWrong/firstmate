@@ -63,9 +63,10 @@ make_spawn_fixture() {
   wt=$case_dir/wt
   fakebin=$case_dir/fakebin
   cli_home=$case_dir/cli
-  mkdir -p "$home/data/traex-task" "$home/data/missing-profile" "$home/os-home" "$home/trae-runtime" \
+  mkdir -p "$home/data/traex-task" "$home/data/raw-traex" "$home/data/missing-profile" "$home/os-home" "$home/trae-runtime" \
     "$home/projects" "$home/state" "$home/config" "$fakebin" "$cli_home"
   printf 'brief\n' > "$home/data/traex-task/brief.md"
+  printf 'brief\n' > "$home/data/raw-traex/brief.md"
   printf 'brief\n' > "$home/data/missing-profile/brief.md"
   mkdir -p "$home/data/traex-scout"
   printf 'scout brief\n' > "$home/data/traex-scout/brief.md"
@@ -169,6 +170,20 @@ EOF
   assert_grep "traex_os_home=$home/os-home" "$home/state/traex-task.meta" "meta lost the authenticated OS home"
   assert_grep "traex_home=$home/trae-runtime" "$home/state/traex-task.meta" "meta lost the Trae runtime home"
   assert_grep "traex_cli_home=$cli_home" "$home/state/traex-task.meta" "meta lost the authenticated CLI home"
+
+  : > "$home/tmux.log"
+  if out=$(run_spawn "$home" "$proj" "$wt" "$fakebin" "$cli_home" \
+      raw-traex "$proj" "$fakebin/traex --dangerously-bypass-hook-trust" \
+      --mode no-mistakes --yolo off); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "raw TraeX launch unexpectedly bypassed the canonical template"
+  assert_contains "$out" 'TraeX raw launch commands are forbidden' \
+    "raw TraeX refusal did not identify the canonical-launch boundary"
+  assert_not_contains "$(cat "$home/tmux.log")" 'new-window' \
+    "raw TraeX refusal created an endpoint"
 
   printf '%s\n' 'worker=off' 'primary=off' 'secondmate=off' > "$home/config/traex-adapter"
   : > "$home/tmux.log"

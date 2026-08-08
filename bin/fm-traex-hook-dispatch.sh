@@ -341,12 +341,12 @@ case "$EVENT" in
     else
       event_slug=session-end
     fi
-    "$FM_ROOT_REAL/bin/fm-busy-event.sh" apply "$STATE_REAL" "$TASK_ID" idle \
-      --gen "$BUSY_GEN" --source traex-hook --event "$event_slug" \
-      >/dev/null 2>&1 || fail_matching idle-write
     session_id=$(printf '%s' "$payload" | jq -r '.session_id | strings | select(length > 0)' 2>/dev/null) || fail_matching session
     turn_id=$(printf '%s' "$payload" | jq -r '.turn_id | strings | select(length > 0)' 2>/dev/null) || fail_matching turn
     append_completion "$EVENT" "$session_id" "$turn_id" || fail_matching completion-write
+    "$FM_ROOT_REAL/bin/fm-busy-event.sh" apply "$STATE_REAL" "$TASK_ID" idle \
+      --gen "$BUSY_GEN" --source traex-hook --event "$event_slug" \
+      >/dev/null 2>&1 || fail_matching idle-write
     ;;
 esac
 exit 0
