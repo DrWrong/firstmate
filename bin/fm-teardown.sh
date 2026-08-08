@@ -71,7 +71,8 @@
 #      attempts. Retries key off the error text, not whether the lock file still
 #      exists after the failed attempt - a lock that self-clears mid-check still
 #      deserves a retry of the return.
-#   2. Other treehouse return failures still abort immediately and loudly (no retry).
+#   2. Other return failures do not enter this lock-retry loop. The path-alias
+#      recovery below is the only separately handled non-lock failure.
 #   3. If every retry still hits the lock signature and the lock remains, it is removed
 #      and the return tried once more ONLY when the lock is provably stale per
 #      bin/fm-lock-lib.sh's fm_lock_is_provably_stale, passing the worktree dir as the
