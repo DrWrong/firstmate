@@ -903,12 +903,22 @@ case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
     HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
-    case "$HARNESS" in
-      traex|traecli)
+    if ! command -v node >/dev/null 2>&1; then
+      echo "error: cannot safely resolve a raw launch command without node" >&2
+      exit 1
+    fi
+    RAW_TRAEX_CLASS=$(node "$FM_ROOT/bin/fm-traex-raw-command-policy.mjs" --command "$LAUNCH" 2>/dev/null) || {
+      echo "error: cannot safely resolve the raw launch command" >&2
+      exit 1
+    }
+    case "$RAW_TRAEX_CLASS" in
+      traex)
         echo "error: TraeX raw launch commands are forbidden; select harness=traex so Firstmate can enforce the canonical binary, homes, flags, and native hook trust" >&2
+        exit 1
+        ;;
+      other) ;;
+      *)
+        echo "error: cannot safely resolve the raw launch command" >&2
         exit 1
         ;;
     esac

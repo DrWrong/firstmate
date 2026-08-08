@@ -14,6 +14,8 @@ TMP_ROOT=$(fm_test_tmproot fm-traex-secondmate)
 SUPPORTED_SHA=e7e194f1a748ecb899f955028f3611048e2760de51f135ef2b49dbaa71331581
 REAL_SHA256SUM=$(command -v sha256sum 2>/dev/null || true)
 [ -n "$REAL_SHA256SUM" ] || { echo 'skip: sha256sum not found'; exit 0; }
+REAL_RM=$(command -v rm 2>/dev/null || true)
+[ -n "$REAL_RM" ] || { echo 'skip: rm not found'; exit 0; }
 
 make_fixture() {
   local case_dir=$1 parent sub fakebin cli_home binary hooks_sha dispatcher_sha
@@ -93,11 +95,21 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/sha256sum" "$fakebin/traex" "$fakebin/tmux"
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${FM_TEST_FAIL_REMOVE_HOME:-0}" = 1 ]; then
+  for argument in "$@"; do
+    [ "$argument" != "$FM_TEST_SECONDMATE_HOME" ] || exit 73
+  done
+fi
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+  chmod +x "$fakebin/sha256sum" "$fakebin/traex" "$fakebin/tmux" "$fakebin/rm"
 
   printf '%s\n' '{"version":1,"hooks":{}}' > "$cli_home/hooks.json"
   TRAECLI_HOME="$cli_home" PATH="$fakebin:$PATH" FM_TEST_TRAEX_SHA="$SUPPORTED_SHA" \
-    FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" "$INSTALL" install >/dev/null \
+    FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" FM_TEST_REAL_RM="$REAL_RM" "$INSTALL" install >/dev/null \
     || fail "secondmate fixture hook install failed"
   hooks_sha=$($REAL_SHA256SUM "$cli_home/hooks.json" | awk '{print $1}')
   dispatcher_sha=$($REAL_SHA256SUM "$cli_home/fm-firstmate-hook.sh" | awk '{print $1}')
@@ -123,6 +135,7 @@ run_env() {  # <parent> <sub> <fakebin> <cli-home> <command...>
     FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_INHERIT=1 TMUX='fake,1,0' \
     TRAECLI_HOME="${FM_TEST_AMBIENT_CLI_HOME:-$cli_home}" FM_TEST_TRAEX_SHA="$SUPPORTED_SHA" \
     FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" FM_TEST_TMUX_LOG="${parent%/parent}/tmux.log" \
+    FM_TEST_REAL_RM="$REAL_RM" \
     FM_TEST_TMUX_MODE="${parent%/parent}/mode" FM_TEST_SECONDMATE_HOME="$sub" \
     FM_TEST_TMUX_WINDOW_STATE="${parent%/parent}/window" \
     FM_TEST_SESSION_ID=session-sm-1 PATH="$fakebin:$PATH" "$@"
@@ -187,6 +200,22 @@ EOF
   [ "$status" -ne 0 ] || fail "resume accepted stale SessionStart evidence"
   assert_contains "$out" 'was not confirmed by SessionStart(source=resume)' \
     "stale resume refusal did not identify the missing fresh callback"
+
+  if out=$(FM_TEARDOWN_GUARD_DONE=1 FM_TEST_FAIL_REMOVE_HOME=1 \
+    FM_TEST_AMBIENT_HOME="${parent%/parent}/wrong-home" \
+    FM_TEST_AMBIENT_TRAE_HOME="${parent%/parent}/wrong-trae" \
+    FM_TEST_AMBIENT_CLI_HOME="${parent%/parent}/wrong-cli" \
+    run_env "$parent" "$sub" "$fakebin" "$cli_home" \
+      "$ROOT/bin/fm-teardown.sh" traex-sm --force 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "forced home-removal failure unexpectedly completed teardown"
+  assert_present "$record" "failed destructive cleanup removed the TraeX registry binding"
+  assert_present "$parent/state/traex-sm.traex-hook-token" \
+    "failed destructive cleanup removed parent binding authority"
+  assert_present "$sub/.fm-traex-hook" "failed destructive cleanup removed the active pointer"
 
   out=$(FM_TEARDOWN_GUARD_DONE=1 \
     FM_TEST_AMBIENT_HOME="${parent%/parent}/wrong-home" \

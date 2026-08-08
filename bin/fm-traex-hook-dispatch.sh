@@ -59,6 +59,10 @@ regular_owned() {
   [ -f "$1" ] && [ ! -L "$1" ] && [ "$(owner_uid "$1" 2>/dev/null)" = "$(id -u)" ]
 }
 
+directory_owned() {
+  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(owner_uid "$1" 2>/dev/null)" = "$(id -u)" ]
+}
+
 field() {  # <record> <key>
   local count
   count=$(grep -c "^$2=" "$1" 2>/dev/null || true)
@@ -178,8 +182,48 @@ PY
   sync 2>/dev/null
 }
 
+completion_line_present() {  # <signal> <gen> <key> <session-hash> <turn-hash> <event>
+  local signal=$1 gen=$2 key=$3 session_hash=$4 turn_hash=$5 event=$6 line prefix suffix seq ts
+  prefix="v1 gen=$gen key=$key session=$session_hash turn=$turn_hash event=$event seq="
+  while IFS= read -r line; do
+    case "$line" in "$prefix"*) ;; *) continue ;; esac
+    suffix=${line#"$prefix"}
+    seq=${suffix%% *}
+    [ "$suffix" != "$seq" ] || continue
+    ts=${suffix#"$seq "}
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    case "$ts" in ''|*[!0-9]*) continue ;; esac
+    return 0
+  done < "$signal"
+  return 1
+}
+
+publish_completion_receipt() {  # <directory> <receipt> <line>
+  local directory=$1 receipt=$2 line=$3 tmp old_umask
+  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    regular_owned "$receipt" && [ "$(cat "$receipt" 2>/dev/null)" = "$line" ] \
+      && fsync_file "$receipt" && fsync_file "$directory"
+    return $?
+  fi
+  old_umask=$(umask); umask 077
+  tmp=$(mktemp "$directory/.completion.XXXXXXXX") || { umask "$old_umask"; return 1; }
+  if ! printf '%s\n' "$line" > "$tmp" \
+      || ! chmod 600 "$tmp" \
+      || ! fsync_file "$tmp" \
+      || ! ln "$tmp" "$receipt" \
+      || ! fsync_file "$receipt" \
+      || ! fsync_file "$directory"; then
+    rm -f "$tmp" 2>/dev/null || true
+    umask "$old_umask"
+    return 1
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  umask "$old_umask"
+}
+
 append_completion() {  # <event> <session-id> <turn-id>
-  local event=$1 session_id=$2 turn_id=$3 lock signal key session_hash turn_hash seq old_umask
+  local event=$1 session_id=$2 turn_id=$3 lock signal key session_hash turn_hash seq old_umask tmp status last_line
+  local receipts receipt receipt_line
   bounded_id "$session_id" && bounded_id "$turn_id" || return 1
   key=$(printf '%s' "$BUSY_GEN|$session_id|$turn_id|$event" | sha256_stdin) || return 1
   session_hash=$(printf '%s' "$session_id" | sha256_stdin) || return 1
@@ -192,9 +236,30 @@ append_completion() {  # <event> <session-id> <turn-id>
   [ ! -e "$signal" ] || regular_owned "$signal" || return 1
   [ ! -e "$lock" ] || [ -d "$lock" ] || return 1
   lock_acquire "$lock" || return 1
-  if [ -f "$signal" ] && grep -Fq " key=$key " "$signal" 2>/dev/null; then
+  receipts=$STATE_REAL/$TASK_ID.traex-completions
+  if [ -e "$receipts" ] || [ -L "$receipts" ]; then
+    directory_owned "$receipts" || { rmdir "$lock" 2>/dev/null || true; return 1; }
+  else
+    mkdir -m 700 "$receipts" || { rmdir "$lock" 2>/dev/null || true; return 1; }
+  fi
+  receipt=$receipts/$key
+  receipt_line="v1 gen=$BUSY_GEN key=$key session=$session_hash turn=$turn_hash event=$event"
+  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+    status=0
+    publish_completion_receipt "$receipts" "$receipt" "$receipt_line" \
+      && [ -f "$signal" ] && fsync_file "$signal" && fsync_file "$STATE_REAL" || status=1
     rmdir "$lock" 2>/dev/null || true
-    return 0
+    return "$status"
+  fi
+  if [ -f "$signal" ] \
+      && completion_line_present "$signal" "$BUSY_GEN" "$key" "$session_hash" "$turn_hash" "$event"; then
+    status=0
+    fsync_file "$signal" && fsync_file "$STATE_REAL" || status=1
+    if [ "$status" -eq 0 ]; then
+      publish_completion_receipt "$receipts" "$receipt" "$receipt_line" || status=1
+    fi
+    rmdir "$lock" 2>/dev/null || true
+    return "$status"
   fi
   seq=1
   if [ -f "$signal" ]; then
@@ -202,14 +267,39 @@ append_completion() {  # <event> <session-id> <turn-id>
   fi
   old_umask=$(umask)
   umask 077
-  if ! printf 'v1 gen=%s key=%s session=%s turn=%s event=%s seq=%s ts=%s\n' \
-      "$BUSY_GEN" "$key" "$session_hash" "$turn_hash" "$event" "$seq" "$(date +%s)" >> "$signal" \
-      || ! fsync_file "$signal"; then
+  tmp=$(mktemp "$STATE_REAL/.$TASK_ID.turn-ended.XXXXXXXX") || {
     umask "$old_umask"
+    rmdir "$lock" 2>/dev/null || true
+    return 1
+  }
+  if [ -f "$signal" ]; then
+    cp "$signal" "$tmp" || status=1
+  else
+    status=0
+  fi
+  if [ "${status:-0}" -eq 0 ] && [ -s "$tmp" ]; then
+    last_line=$(tail -c 1 "$tmp" 2>/dev/null | wc -l | tr -d ' ')
+    [ "$last_line" = 1 ] || printf '\n' >> "$tmp" || status=1
+  fi
+  if [ "${status:-0}" -ne 0 ] \
+      || ! printf 'v1 gen=%s key=%s session=%s turn=%s event=%s seq=%s ts=%s\n' \
+        "$BUSY_GEN" "$key" "$session_hash" "$turn_hash" "$event" "$seq" "$(date +%s)" >> "$tmp" \
+      || ! chmod 600 "$tmp" \
+      || ! fsync_file "$tmp" \
+      || ! mv -f "$tmp" "$signal" \
+      || ! fsync_file "$signal" \
+      || ! fsync_file "$STATE_REAL"; then
+    umask "$old_umask"
+    rm -f "$tmp" 2>/dev/null || true
     rmdir "$lock" 2>/dev/null || true
     return 1
   fi
   umask "$old_umask"
+  rm -f "$tmp" 2>/dev/null || true
+  if ! publish_completion_receipt "$receipts" "$receipt" "$receipt_line"; then
+    rmdir "$lock" 2>/dev/null || true
+    return 1
+  fi
   rmdir "$lock" 2>/dev/null || true
 }
 
@@ -253,15 +343,38 @@ EVENT=$(printf '%s' "$payload" | jq -r '.hook_event_name // empty' 2>/dev/null)
 case "$EVENT" in SessionStart|UserPromptSubmit|Stop|SessionEnd) ;; *) exit 0 ;; esac
 CWD=$(printf '%s' "$payload" | jq -r '.cwd | strings | select(length > 0)' 2>/dev/null) || exit 0
 WORKTREE_PAYLOAD_REAL=$(real_dir "$CWD") || exit 0
-POINTER=$WORKTREE_PAYLOAD_REAL/.fm-traex-hook
-regular_owned "$POINTER" || exit 0
-[ "$(wc -l < "$POINTER" 2>/dev/null | tr -d ' ')" = 1 ] || exit 0
-pointer_line=$(cat "$POINTER" 2>/dev/null) || exit 0
-case "$pointer_line" in token=*) TOKEN=${pointer_line#token=} ;; *) exit 0 ;; esac
-token_valid "$TOKEN" || exit 0
-
 SELF_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || exit 0
 REGISTRY=$SELF_DIR/fm-firstmate-hooks.d
+POINTER=$WORKTREE_PAYLOAD_REAL/.fm-traex-hook
+pointer_valid=0
+if regular_owned "$POINTER" \
+    && [ "$(wc -l < "$POINTER" 2>/dev/null | tr -d ' ')" = 1 ]; then
+  pointer_line=$(cat "$POINTER" 2>/dev/null || true)
+  case "$pointer_line" in
+    token=*) TOKEN=${pointer_line#token=}; token_valid "$TOKEN" && pointer_valid=1 ;;
+  esac
+fi
+if [ "$pointer_valid" -ne 1 ]; then
+  active_count=0
+  if [ -e "$REGISTRY" ] || [ -L "$REGISTRY" ]; then
+    if ! { [ -d "$REGISTRY" ] && [ ! -L "$REGISTRY" ] \
+        && [ "$(owner_uid "$REGISTRY" 2>/dev/null)" = "$(id -u)" ]; }; then
+      fail_matching registry
+    fi
+    for active_record in "$REGISTRY"/*; do
+      [ -e "$active_record" ] || [ -L "$active_record" ] || continue
+      regular_owned "$active_record" || fail_matching registry
+      active_token=${active_record##*/}
+      token_valid "$active_token" || continue
+      [ "$(field "$active_record" protocol 2>/dev/null)" = "$PROTOCOL" ] || continue
+      [ "$(field "$active_record" token 2>/dev/null)" = "$active_token" ] || continue
+      [ "$(field "$active_record" worktree_real 2>/dev/null)" = "$WORKTREE_PAYLOAD_REAL" ] || continue
+      active_count=$((active_count + 1))
+    done
+  fi
+  [ "$active_count" -eq 0 ] || fail_matching pointer
+  exit 0
+fi
 if ! { [ -d "$REGISTRY" ] && [ ! -L "$REGISTRY" ] \
   && [ "$(owner_uid "$REGISTRY" 2>/dev/null)" = "$(id -u)" ]; }; then
   fail_matching registry

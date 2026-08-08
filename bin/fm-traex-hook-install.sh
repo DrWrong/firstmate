@@ -275,6 +275,25 @@ register_binding() {  # <role> <task> <worktree> <state> <root> <home> <gen|-> <
       && [ "$(field "$record" adapter_version 2>/dev/null)" = "$FM_TRAEX_SUPPORTED_VERSION" ] \
       && [ "$(field "$record" token_state_real 2>/dev/null)" = "$token_state" ] \
       || { printf 'error: existing TraeX binding does not match the requested registration\n' >&2; return 1; }
+    if [ ! -e "$pointer" ] && [ ! -L "$pointer" ]; then
+      old_umask=$(umask); umask 077
+      pointer_tmp=$(mktemp "$worktree_real/.fm-traex-pointer.XXXXXXXX") || { umask "$old_umask"; return 1; }
+      if ! printf 'token=%s\n' "$token" > "$pointer_tmp" || ! chmod 600 "$pointer_tmp"; then
+        rm -f "$pointer_tmp"
+        umask "$old_umask"
+        return 1
+      fi
+      if ! ln "$pointer_tmp" "$pointer"; then
+        if ! regular_owned "$pointer" || [ "$(cat "$pointer" 2>/dev/null)" != "token=$token" ]; then
+          rm -f "$pointer_tmp"
+          umask "$old_umask"
+          printf 'error: cannot atomically restore the TraeX worktree pointer\n' >&2
+          return 1
+        fi
+      fi
+      rm -f "$pointer_tmp"
+      umask "$old_umask"
+    fi
     return 0
   fi
   old_umask=$(umask); umask 077

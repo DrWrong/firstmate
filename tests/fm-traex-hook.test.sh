@@ -229,7 +229,7 @@ EOF
 }
 
 test_worker_scope_busy_completion_and_failure_visibility() {
-  local rec case_dir cli_home fakebin state wt root home gen token token_state dispatcher out status lines badgit
+  local rec case_dir cli_home fakebin state wt root home gen token token_state dispatcher out status lines badgit key complete_count
   rec=$(setup_adapter worker) || fail "worker setup failed"
   IFS='|' read -r case_dir cli_home fakebin <<EOF
 $rec
@@ -269,6 +269,41 @@ SH
   run_adapter "$cli_home" "$fakebin" "$INSTALL" register worker task-a "$wt" "$state" "$root" "$home" "$gen" "$token_state" \
     || fail "worker binding registration failed"
   dispatcher="$cli_home/fm-firstmate-hook.sh"
+  token=$(cat "$token_state")
+
+  rm -f "$wt/.fm-traex-hook"
+  if out=$(payload Stop "$wt" | run_adapter "$cli_home" "$fakebin" "$dispatcher" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" = 2 ] || fail "active binding with a missing pointer returned $status, expected 2"
+  assert_contains "$out" 'lifecycle persistence failed (pointer)' \
+    "missing active pointer did not fail closed at the pointer boundary"
+  run_adapter "$cli_home" "$fakebin" "$INSTALL" register worker task-a "$wt" "$state" "$root" "$home" "$gen" "$token_state" \
+    || fail "idempotent registration did not restore a missing pointer"
+  [ -f "$wt/.fm-traex-hook" ] && [ ! -L "$wt/.fm-traex-hook" ] \
+    || fail "idempotent registration did not restore an owned regular pointer"
+  [ "$(cat "$wt/.fm-traex-hook")" = "token=$token" ] \
+    || fail "idempotent registration restored the wrong pointer payload"
+
+  rm -f "$wt/.fm-traex-hook"
+  ln -s "$token_state" "$wt/.fm-traex-hook"
+  if out=$(payload Stop "$wt" | run_adapter "$cli_home" "$fakebin" "$dispatcher" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" = 2 ] || fail "active binding with a symlinked pointer returned $status, expected 2"
+  assert_contains "$out" 'lifecycle persistence failed (pointer)' \
+    "symlinked active pointer did not fail closed at the pointer boundary"
+  if run_adapter "$cli_home" "$fakebin" "$INSTALL" register worker task-a "$wt" "$state" "$root" "$home" "$gen" "$token_state" \
+      >/dev/null 2>&1; then
+    fail "idempotent registration accepted a symlinked pointer"
+  fi
+  rm -f "$wt/.fm-traex-hook"
+  run_adapter "$cli_home" "$fakebin" "$INSTALL" register worker task-a "$wt" "$state" "$root" "$home" "$gen" "$token_state" \
+    || fail "idempotent registration did not republish the pointer after safe repair"
 
   payload UserPromptSubmit "$wt" | run_adapter "$cli_home" "$fakebin" "$dispatcher" \
     || fail "UserPromptSubmit callback failed"
@@ -289,6 +324,23 @@ SH
   lines=$(wc -l < "$state/task-a.turn-ended" | tr -d ' ')
   [ "$lines" = 2 ] || fail "distinct SessionEnd completion did not append durably"
   assert_grep 'event=SessionEnd' "$state/task-a.turn-ended" "SessionEnd completion evidence missing"
+
+  payload UserPromptSubmit "$wt" sess-partial turn-partial | run_adapter "$cli_home" "$fakebin" "$dispatcher" \
+    || fail "could not arm semantic busy for partial-completion recovery"
+  key=$(printf '%s' "$gen|sess-partial|turn-partial|Stop" | "$REAL_SHA256SUM" | awk '{print substr($1,1,32)}')
+  printf 'v1 gen=%s key=%s ' "$gen" "$key" >> "$state/task-a.turn-ended"
+  payload Stop "$wt" sess-partial turn-partial | run_adapter "$cli_home" "$fakebin" "$dispatcher" \
+    || fail "retry did not replace partial completion evidence durably"
+  complete_count=$(awk -v gen_field="gen=$gen" -v key_field="key=$key" '
+    $1 == "v1" && $2 == gen_field && $3 == key_field &&
+      $4 ~ /^session=[0-9a-f]+$/ && length($4) == 24 &&
+      $5 ~ /^turn=[0-9a-f]+$/ && length($5) == 21 &&
+      $6 == "event=Stop" && $7 ~ /^seq=[0-9]+$/ &&
+      $8 ~ /^ts=[0-9]+$/ && NF == 8 { count++ }
+    END { print count + 0 }
+  ' "$state/task-a.turn-ended")
+  [ "$complete_count" = 1 ] \
+    || fail "partial completion key was treated as a durable complete record"
 
   mkdir -p "$case_dir/unbound"
   payload Stop "$case_dir/unbound" | run_adapter "$cli_home" "$fakebin" "$dispatcher" \
@@ -324,7 +376,6 @@ SH
     *) fail "completion failure published idle before durable completion: $out" ;;
   esac
   rmdir "$state/task-a.turn-ended" || fail "could not clear completion-failure fixture"
-  token=$(cat "$token_state")
   run_adapter "$cli_home" "$fakebin" "$INSTALL" unregister "$wt" "$token_state" \
     || fail "worker binding unregister failed"
   assert_absent "$wt/.fm-traex-hook" "unregister left the worktree pointer"

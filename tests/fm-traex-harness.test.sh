@@ -40,8 +40,8 @@ test_exact_detection_and_session_lock_names() {
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  *'comm='*) printf '%s\n' "/usr/local/bin/${FM_TEST_PROCESS_NAME:-traex}" ;;
-  *'args='*) printf '%s\n' "${FM_TEST_PROCESS_NAME:-traex}" ;;
+  *'comm='*) printf '%s\n' "${FM_TEST_PROCESS_PATH:-/usr/local/bin/${FM_TEST_PROCESS_NAME:-traex}}" ;;
+  *'args='*) printf '%s\n' "${FM_TEST_PROCESS_PATH:-${FM_TEST_PROCESS_NAME:-traex}}" ;;
   *'ppid='*) printf '%s\n' 1 ;;
 esac
 SH
@@ -53,6 +53,10 @@ SH
       '. "$1/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 42' _ "$ROOT"; then
     fail "session lock accepted a traex-helper lookalike"
   fi
+  if PATH="$fakebin:$PATH" FM_TEST_PROCESS_PATH=/tmp/traex/helper bash -c \
+      '. "$1/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 42' _ "$ROOT"; then
+    fail "session lock accepted TraeX from a directory component"
+  fi
   pass "TraeX detection and session-lock recognition use only the exact marker/process identities"
 }
 
@@ -63,10 +67,17 @@ make_spawn_fixture() {
   wt=$case_dir/wt
   fakebin=$case_dir/fakebin
   cli_home=$case_dir/cli
-  mkdir -p "$home/data/traex-task" "$home/data/raw-traex" "$home/data/missing-profile" "$home/os-home" "$home/trae-runtime" \
+  mkdir -p "$home/data/traex-task" "$home/data/raw-traex" "$home/data/raw-wrapper-1" \
+    "$home/data/raw-wrapper-2" "$home/data/raw-wrapper-3" "$home/data/raw-wrapper-4" \
+    "$home/data/raw-wrapper-safe" "$home/data/missing-profile" "$home/os-home" "$home/trae-runtime" \
     "$home/projects" "$home/state" "$home/config" "$fakebin" "$cli_home"
   printf 'brief\n' > "$home/data/traex-task/brief.md"
   printf 'brief\n' > "$home/data/raw-traex/brief.md"
+  printf 'brief\n' > "$home/data/raw-wrapper-1/brief.md"
+  printf 'brief\n' > "$home/data/raw-wrapper-2/brief.md"
+  printf 'brief\n' > "$home/data/raw-wrapper-3/brief.md"
+  printf 'brief\n' > "$home/data/raw-wrapper-4/brief.md"
+  printf 'brief\n' > "$home/data/raw-wrapper-safe/brief.md"
   printf 'brief\n' > "$home/data/missing-profile/brief.md"
   mkdir -p "$home/data/traex-scout"
   printf 'scout brief\n' > "$home/data/traex-scout/brief.md"
@@ -144,7 +155,9 @@ run_spawn() {  # <home> <proj> <wt> <fakebin> <cli-home> [spawn args...]
 }
 
 test_spawn_launch_and_closed_axes() {
-  local rec home proj wt fakebin cli_home out status launch id
+  local rec home proj wt fakebin cli_home out status launch id raw_id raw_command safe_rec
+  local safe_home safe_proj safe_wt safe_fakebin safe_cli_home
+  local -a raw_commands
   rec=$(make_spawn_fixture "$TMP_ROOT/spawn") || fail "spawn fixture failed"
   IFS='|' read -r home proj wt fakebin cli_home <<EOF
 $rec
@@ -184,6 +197,37 @@ EOF
     "raw TraeX refusal did not identify the canonical-launch boundary"
   assert_not_contains "$(cat "$home/tmux.log")" 'new-window' \
     "raw TraeX refusal created an endpoint"
+
+  raw_commands=(
+    "env FOO=1 '$fakebin/traex' --dangerously-bypass-hook-trust"
+    "command '$fakebin/traex' --dangerously-bypass-hook-trust"
+    "bash -lc 'env FOO=1 command \"$fakebin/traex\" --dangerously-bypass-hook-trust'"
+    "env bash -c 'command traex --dangerously-bypass-hook-trust'"
+  )
+  for id in "${!raw_commands[@]}"; do
+    raw_id=raw-wrapper-$((id + 1))
+    raw_command=${raw_commands[$id]}
+    if out=$(run_spawn "$home" "$proj" "$wt" "$fakebin" "$cli_home" \
+        "$raw_id" "$proj" "$raw_command" --mode no-mistakes --yolo off); then
+      status=0
+    else
+      status=$?
+    fi
+    [ "$status" -ne 0 ] || fail "wrapped raw TraeX launch unexpectedly bypassed the canonical template: $raw_command"
+    assert_contains "$out" 'TraeX raw launch commands are forbidden' \
+      "wrapped raw TraeX refusal did not identify the canonical-launch boundary"
+  done
+  assert_not_contains "$(cat "$home/tmux.log")" 'new-window' \
+    "wrapped raw TraeX refusal created an endpoint"
+
+  safe_rec=$(make_spawn_fixture "$TMP_ROOT/wrapper-safe") || fail "safe wrapper fixture failed"
+  IFS='|' read -r safe_home safe_proj safe_wt safe_fakebin safe_cli_home <<EOF
+$safe_rec
+EOF
+  out=$(run_spawn "$safe_home" "$safe_proj" "$safe_wt" "$safe_fakebin" "$safe_cli_home" \
+    raw-wrapper-safe "$safe_proj" 'env FOO=1 custom-agent --flag' --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "non-TraeX raw wrapper was rejected: $out"
 
   printf '%s\n' 'worker=off' 'primary=off' 'secondmate=off' > "$home/config/traex-adapter"
   : > "$home/tmux.log"
