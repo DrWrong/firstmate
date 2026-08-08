@@ -94,6 +94,29 @@ atomic_write() {  # <target> <source> <mode>
   fi
 }
 
+render_dispatcher() {  # <source> <target>
+  local source=$1 target=$2 line version_seen=0 sha_seen=0
+  : > "$target" || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      'SUPPORTED_VERSION=__FM_TRAEX_SUPPORTED_VERSION__')
+        [ "$version_seen" -eq 0 ] || return 1
+        printf 'SUPPORTED_VERSION=%s\n' "$(shell_quote "$FM_TRAEX_SUPPORTED_VERSION")" >> "$target" || return 1
+        version_seen=1
+        ;;
+      'SUPPORTED_BINARY_SHA256=__FM_TRAEX_SUPPORTED_SHA256__')
+        [ "$sha_seen" -eq 0 ] || return 1
+        printf 'SUPPORTED_BINARY_SHA256=%s\n' "$(shell_quote "$FM_TRAEX_SUPPORTED_SHA256")" >> "$target" || return 1
+        sha_seen=1
+        ;;
+      *)
+        printf '%s\n' "$line" >> "$target" || return 1
+        ;;
+    esac
+  done < "$source"
+  [ "$version_seen" -eq 1 ] && [ "$sha_seen" -eq 1 ]
+}
+
 managed_command() {
   local dispatcher
   dispatcher=$(fm_traex_dispatcher_path) || return 1
@@ -164,7 +187,7 @@ install_hook() {
           | map(select((.hooks | length) > 0))) + [$managed]))
   ' "$existing" > "$candidate" || { rm -rf "$work"; return 1; }
   validate_hooks_json "$candidate" || { rm -rf "$work"; return 1; }
-  cp "$source" "$source_tmp" || { rm -rf "$work"; return 1; }
+  render_dispatcher "$source" "$source_tmp" || { rm -rf "$work"; return 1; }
   chmod 700 "$source_tmp"
   if [ ! -f "$dispatcher" ] || ! cmp -s "$source_tmp" "$dispatcher"; then
     atomic_write "$dispatcher" "$source_tmp" 700 || { rm -rf "$work"; return 1; }

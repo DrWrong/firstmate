@@ -32,7 +32,7 @@ SH
 set -u
 case "${1:-}" in
   --version)
-    printf '%s\n' 'traecli 0.200.19(internal edition)'
+    printf '%s\n' "${FM_TEST_TRAEX_VERSION:-traecli 0.200.19(internal edition)}"
     exit 0
     ;;
   login)
@@ -226,6 +226,58 @@ EOF
   [ -z "$(find "$external" -mindepth 1 -maxdepth 1 -print -quit)" ] \
     || fail "unsafe-registry refusal wrote through the symlink"
   pass "TraeX installer merge-preserves user hooks and receipt/model/effort/role preflight fails closed"
+}
+
+test_library_owned_binary_pin_renders_dispatcher() {
+  local case_dir cli_home fakebin adapter_bin alternate_version alternate_sha state wt root home gen token_state dispatcher
+  case_dir="$TMP_ROOT/pin-owner"
+  cli_home="$case_dir/cli"
+  adapter_bin="$case_dir/adapter/bin"
+  fakebin=$(make_fake_cli "$case_dir")
+  alternate_version='traecli 0.200.19(test-owner)'
+  alternate_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  mkdir -p "$cli_home" "$adapter_bin"
+  cp "$ROOT/bin/fm-traex-lib.sh" "$adapter_bin/fm-traex-lib.sh"
+  cp "$ROOT/bin/fm-traex-hook-install.sh" "$adapter_bin/fm-traex-hook-install.sh"
+  cp "$ROOT/bin/fm-traex-hook-dispatch.sh" "$adapter_bin/fm-traex-hook-dispatch.sh"
+  sed -e "s|^FM_TRAEX_SUPPORTED_VERSION=.*|FM_TRAEX_SUPPORTED_VERSION='$alternate_version'|" \
+    -e "s|^FM_TRAEX_SUPPORTED_SHA256=.*|FM_TRAEX_SUPPORTED_SHA256='$alternate_sha'|" \
+    "$adapter_bin/fm-traex-lib.sh" > "$case_dir/fm-traex-lib.sh"
+  mv "$case_dir/fm-traex-lib.sh" "$adapter_bin/fm-traex-lib.sh"
+  chmod +x "$adapter_bin/fm-traex-hook-install.sh" "$adapter_bin/fm-traex-hook-dispatch.sh"
+  printf '%s\n' '{"version":1,"hooks":{}}' > "$cli_home/hooks.json"
+  TRAECLI_HOME="$cli_home" PATH="$fakebin:$PATH" FM_TEST_TRAEX_VERSION="$alternate_version" \
+    FM_TEST_TRAEX_SHA="$alternate_sha" FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" \
+    "$adapter_bin/fm-traex-hook-install.sh" install >/dev/null \
+    || fail "library-owned binary pin did not render the installed dispatcher"
+  TRAECLI_HOME="$cli_home" PATH="$fakebin:$PATH" FM_TEST_TRAEX_VERSION="$alternate_version" \
+    FM_TEST_TRAEX_SHA="$alternate_sha" FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" \
+    "$adapter_bin/fm-traex-hook-install.sh" probe --model GPT-5.6-Luna >/dev/null \
+    || fail "rendered dispatcher did not complete the native lifecycle probe"
+
+  state="$case_dir/state"
+  wt="$case_dir/worktree"
+  root="$case_dir/root"
+  home="$case_dir/home"
+  gen=pin-owner-gen
+  token_state="$state/pin-owner.traex-hook-token"
+  mkdir -p "$state" "$wt" "$root" "$home"
+  git -C "$wt" init -q
+  printf '%s\n' "$gen" > "$state/pin-owner.busy-gen"
+  printf '%s\n' 'harness=traex' "busy_gen=$gen" "worktree=$wt" > "$state/pin-owner.meta"
+  TRAECLI_HOME="$cli_home" PATH="$fakebin:$PATH" FM_TEST_TRAEX_VERSION="$alternate_version" \
+    FM_TEST_TRAEX_SHA="$alternate_sha" FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" \
+    "$adapter_bin/fm-traex-hook-install.sh" register worker pin-owner "$wt" "$state" \
+      "$root" "$home" "$gen" "$token_state" >/dev/null \
+    || fail "library-owned binary pin could not register a worker binding"
+  dispatcher="$cli_home/fm-firstmate-hook.sh"
+  payload SessionStart "$wt" owner-session turn-unused startup \
+    | TRAECLI_HOME="$cli_home" PATH="$fakebin:$PATH" FM_TEST_TRAEX_VERSION="$alternate_version" \
+      FM_TEST_TRAEX_SHA="$alternate_sha" FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" "$dispatcher" \
+    || fail "installed dispatcher retained a competing binary identity pin"
+  [ "$(sed -n 's/^session_id=//p' "$state/pin-owner.traex-session")" = owner-session ] \
+    || fail "rendered dispatcher did not accept its library-owned binary identity"
+  pass "TraeX installed dispatcher consumes the library-owned binary identity"
 }
 
 test_worker_scope_busy_completion_and_failure_visibility() {
@@ -454,5 +506,6 @@ SH
 }
 
 test_install_merge_probe_and_preflight
+test_library_owned_binary_pin_renders_dispatcher
 test_worker_scope_busy_completion_and_failure_visibility
 test_primary_session_start_and_stop_guard
