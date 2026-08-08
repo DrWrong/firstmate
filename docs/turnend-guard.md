@@ -52,10 +52,7 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.
-In the default Codex mode, `stop_hook_active` records that a prior block forced the current continuation but is not proof that supervision recovered.
-Every Codex Stop therefore re-evaluates the live watcher predicate while supervision is needed, so a continuation that skipped its foreground checkpoint or reached the end of a quiet checkpoint is blocked back into another bounded cycle.
-Once a checkpoint catches a durable terminal signal, the model drains and handles that wake through the ordinary protocol before the task metadata disappears and the Stop can finish.
-This keeps each foreground wait bounded without letting the one-shot payload field silently reopen an unsupervised interval.
+In the default Codex mode, a true value lets the second stop finish after one forced continuation.
 
 Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes, which re-opened the 2026-07-21 blind window under the default one-shot behavior.
@@ -84,7 +81,6 @@ Grok makes exactly one typed capability decision from each running Stop payload.
 A boolean `stopHookActive` selects native blocking, including both false on the initial stop and true on the bounded continuation.
 The camel-case field has precedence when both spellings appear; when it is absent, a boolean `stop_hook_active` selects the same native path for compatibility.
 The native path returns the shared guard's status and stderr to the same Grok process and never starts `grok --resume`.
-It invokes the shared guard with `--grok`, preserving Grok's one-block loop guard independently from Codex's repeated supervision check.
 When both capability spellings are absent, the adapter preserves one pre-native `grok --resume` fallback guarded by `GROK_TURNEND_GUARD_ACTIVE` and intentionally omits `--permission-mode`.
 Malformed JSON, a selected field with a non-boolean type, missing `jq`, missing hook prerequisites, or an already-active legacy guard allows the stop without starting either continuation path.
 Grok's project hook requires the checkout to be trusted with `/hooks-trust` or launch-time `--trust`; genuine pre-native builds can run the same tracked hook from an isolated global hook directory.
