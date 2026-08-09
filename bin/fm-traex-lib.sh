@@ -327,7 +327,8 @@ fm_traex_model_supported() {  # <binary> <model>
     printf 'error: TraeX model catalog is unavailable; refusing to guess model support\n' >&2
     return 1
   }
-  printf '%s' "$catalog" | jq -e --arg model "$2" 'type == "array" and any(.[]; .name == $model)' >/dev/null 2>&1 || {
+  printf '%s' "$catalog" | jq -e --arg model "$2" \
+    'type == "array" and any(.[]; .real_name? == $model or .name? == $model)' >/dev/null 2>&1 || {
     printf 'error: model is not present in the authenticated TraeX catalog: %s\n' "$2" >&2
     return 1
   }

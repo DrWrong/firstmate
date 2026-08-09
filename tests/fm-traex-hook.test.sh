@@ -51,7 +51,7 @@ case "${1:-}" in
     ;;
   models)
     [ "${2:-}" = --json ] || exit 2
-    printf '%s\n' '[{"name":"GPT-5.6-Luna","provider":"trae"},{"name":"Catalog-Only","provider":"trae"}]'
+    printf '%s\n' '[{"name":"gpt-5.6-luna","real_name":"GPT-5.6-Luna","provider":"trae"},{"name":"catalog-only","real_name":"Catalog-Only","provider":"trae"}]'
     exit 0
     ;;
   exec)

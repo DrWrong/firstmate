@@ -142,14 +142,14 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
-| traex | Run `traex models --json`; Firstmate preflight repeats this authenticated lookup and refuses a missing exact `.name`. |
+| traex | Run `traex models --json`; Firstmate preflight repeats this authenticated lookup and refuses unless the supported model exactly matches `.real_name` or `.name`. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
 A discovery surface you could not reach establishes nothing; report that as uncertainty rather than turning it into a supported or unsupported verdict.
 
-When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
-This preserves launch success instead of passing a known-bad value.
+Except for TraeX's fail-closed profile gate, when a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
+This preserves launch success instead of passing a known-bad value, while TraeX refuses before endpoint creation.
 
 ## no-mistakes skill invocation
 

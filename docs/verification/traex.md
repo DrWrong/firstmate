@@ -60,7 +60,10 @@ After that correction, the complete opt-in live suite passed in fresh disposable
 
 ## TUI, input, and process semantics
 
-The real TUI rendered `GPT-5.6-Luna low`; separate model-qualified runs rendered `low`, `medium`, `high`, `xhigh`, and `max` exactly. The authenticated `traex models --json` result proves that exact model remains account-visible, while the narrower live-verified model/effort matrix is pinned in `bin/fm-traex-lib.sh`. Catalog visibility alone does not open another model, and worker/scout/local-secondmate launch refuses an omitted model or effort.
+The real TUI rendered `GPT-5.6-Luna low`; separate model-qualified runs rendered `low`, `medium`, `high`, `xhigh`, and `max` exactly.
+The authenticated `traex models --json` result identified it as `.name="gpt-5.6-luna"` and `.real_name="GPT-5.6-Luna"`, so preflight accepts the exact pinned model against either field rather than assuming the display spelling lives in `.name`.
+The narrower live-verified model/effort matrix remains pinned in `bin/fm-traex-lib.sh`.
+Catalog visibility alone does not open another model, and worker/scout/local-secondmate launch refuses an omitted model or effort.
 
 The composer was captured with ANSI intact and added to `tests/fm-composer-ghost.test.sh`. Escape interrupted a running shell tool, TraeX restored composer content, and `C-u` cleared it. This is why `fm-send` performs both actions and records the semantic interrupt only after delivery. Safe submission continues to use the shared structural composer and acknowledgement owner; visible placeholder text is not treated as state.
 

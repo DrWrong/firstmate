@@ -50,7 +50,7 @@ case "${1:-}" in
   --version) printf '%s\n' 'traecli 0.200.19(internal edition)' ;;
   login) printf '%s\n' 'Logged in using Trae' >&2 ;;
   features) printf '%s\n' 'hooks stable true' 'plugin_hooks stable true' ;;
-  models) printf '%s\n' '[{"name":"GPT-5.6-Luna","provider":"trae"}]' ;;
+  models) printf '%s\n' '[{"name":"gpt-5.6-luna","real_name":"GPT-5.6-Luna","provider":"trae"}]' ;;
   *) exit 2 ;;
 esac
 SH

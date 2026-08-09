@@ -51,7 +51,7 @@ The installed pi-signed 0.82.0 wrapper repeated the Pi primary extension and ses
 ### Run-tier source vocabulary and context-reset injection
 
 The run tier depends on three facts only the vendor can supply: the session-open source it reports, whether hook stdout reaches model context on a context-RESET open rather than only a cold one, and whether a worker the hook detaches survives the hook returning.
-The first two were measured on 2026-08-05 against a throwaway Firstmate-shaped lab carrying each harness's own tracked registration with a recorder standing in for `bin/fm-sessionstart-run.sh`.
+The first two were measured on 2026-08-05 for the tracked Claude, Codex, and Pi registrations, and on 2026-08-08 for TraeX's separately installed native-trust-reviewed user hook.
 Each open printed a source-stamped token, and the model was asked to quote that token back, so producing hook stdout could never be mistaken for delivering it.
 The third is recorded below.
 
@@ -122,7 +122,8 @@ SECONDMATE_SYNC: secondmate ios: skipped: remote inheritance failed on remote-ma
 
 The unreachable route was preserved rather than relaunched in both runs, and the result surfaced durably as a queued `check: startup-network` wake once the worker finished.
 
-Codex and Pi were not installed as run-tier labs in this measurement, so their evidence for this fact is NOT refreshed; `tests/fm-sessionstart-hook-live-e2e.test.sh` asserts it for every installed run-tier harness and is the command that refreshes this record.
+Codex and Pi were not installed as tracked run-tier labs in this measurement, so their evidence for this fact is NOT refreshed; `tests/fm-sessionstart-hook-live-e2e.test.sh` asserts it for each installed Claude, Codex, or Pi adapter and refreshes those rows.
+TraeX's separately bound real-binary evidence is owned by [`traex.md`](traex.md).
 A harness that did reap the worker degrades loudly rather than silently: the leftover record reads as an abandoned run needing a rerun, and the next session start re-derives every finding, because these sweeps are idempotent detectors.
 
 Current deterministic and live entry points:
@@ -137,8 +138,9 @@ FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
 FM_TRAEX_LIVE_E2E=1 tests/fm-traex-live-e2e.test.sh
 ```
 
-`tests/fm-sessionstart-hook-live-e2e.test.sh` is the command that refreshes the table above; run it after every run-tier harness upgrade.
-It reports an absent harness explicitly, asserts Pi compaction rather than noting it, and refuses to pass when no run-tier harness was installed at all.
+`tests/fm-sessionstart-hook-live-e2e.test.sh` refreshes the Claude, Codex, and Pi rows; run it after any upgrade to those run-tier harnesses.
+It reports an absent harness explicitly, asserts Pi compaction rather than noting it, and refuses to pass when none of those three harnesses was installed.
+The TraeX row comes from the separate primary-bound pass recorded in [`traex.md`](traex.md); its opt-in suite above refreshes the native lifecycle and exact-session resume portions of that evidence.
 
 The Ahoy first-message boundary was reverified on 2026-07-22 with Pi 0.81.1 and OpenCode 1.17.18.
 Marked current operational input and the two exact legacy compatibility shapes selected Bearings, while genuine near-miss captain messages remained real boundaries.
@@ -146,7 +148,7 @@ The detailed reconciliation and task chronology stay in the private audit report
 
 ## Semantic busy state
 
-The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them.
+The original per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them, and TraeX's trusted native-hook source was added through its separate 2026-08-08 pass.
 Each pass polled `state/<id>.busy-state` while a real turn ran.
 
 | Harness | Version verified | Semantic source | Observed result |
@@ -177,6 +179,7 @@ Deterministic entry points:
 tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
+tests/fm-traex-hook.test.sh
 ```
 
 ## Turn-end guard
