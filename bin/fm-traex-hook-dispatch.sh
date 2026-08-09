@@ -97,7 +97,7 @@ receipt_valid() {  # <cli-home>
     and .binary_sha256 == $sha and (.binary_path | strings | startswith("/"))
     and (.hooks_sha256 | strings | test("^[0-9a-f]{64}$"))
     and (.dispatcher_sha256 | strings | test("^[0-9a-f]{64}$"))
-    and .events == ["SessionStart","UserPromptSubmit","Stop","SessionEnd"]
+    and .events == ["SessionStart","UserPromptSubmit","PreToolUse","Stop","SessionEnd"]
   ' "$receipt" >/dev/null 2>&1 || return 1
   binary=$(jq -r '.binary_path' "$receipt")
   regular_owned "$binary" && [ -x "$binary" ] || return 1
@@ -147,7 +147,8 @@ primary_binding_valid() {  # <record>
   regular_owned "$state_token" || return 1
   [ "$(cat "$state_token" 2>/dev/null)" = "$TOKEN" ] \
     && [ -x "$FM_ROOT_REAL/bin/fm-sessionstart-run.sh" ] \
-    && [ -x "$FM_ROOT_REAL/bin/fm-turnend-guard.sh" ]
+    && [ -x "$FM_ROOT_REAL/bin/fm-turnend-guard.sh" ] \
+    && fm_traex_primary_binding_record_matches "$record" "$FM_ROOT_REAL" "$FM_HOME_REAL" "$STATE_REAL"
 }
 
 lock_acquire() {  # <lock-dir>
@@ -340,7 +341,7 @@ payload=$(dd bs=$((MAX_PAYLOAD + 1)) count=1 2>/dev/null || true)
 command -v jq >/dev/null 2>&1 || exit 0
 printf '%s' "$payload" | jq -e 'type == "object"' >/dev/null 2>&1 || exit 0
 EVENT=$(printf '%s' "$payload" | jq -r '.hook_event_name // empty' 2>/dev/null)
-case "$EVENT" in SessionStart|UserPromptSubmit|Stop|SessionEnd) ;; *) exit 0 ;; esac
+case "$EVENT" in SessionStart|UserPromptSubmit|PreToolUse|Stop|SessionEnd|PostCompact) ;; *) exit 0 ;; esac
 CWD=$(printf '%s' "$payload" | jq -r '.cwd | strings | select(length > 0)' 2>/dev/null) || exit 0
 WORKTREE_PAYLOAD_REAL=$(real_dir "$CWD") || exit 0
 SELF_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || exit 0
@@ -417,20 +418,69 @@ fi
 
 receipt_valid "$SELF_DIR" || fail_matching receipt
 if [ "$ROLE" = primary ]; then
+  # The shared session-lock owner loads the TraeX proof contract. Native hooks
+  # have real TraeX ancestry; sandboxed tools later consume only its bounded
+  # PreToolUse proof through the same owner.
+  # shellcheck source=bin/fm-session-lock-lib.sh
+  . "$FM_ROOT_REAL/bin/fm-session-lock-lib.sh" || fail_matching proof-library
   primary_binding_valid "$RECORD" || fail_matching binding
   case "$EVENT" in
     SessionStart)
-      source=$(printf '%s' "$payload" | jq -r '.source // "startup"' 2>/dev/null)
+      source=$(printf '%s' "$payload" | jq -r '.source | strings | select(length > 0)' 2>/dev/null) || fail_matching source
       session_id=$(printf '%s' "$payload" | jq -r '.session_id | strings | select(length > 0)' 2>/dev/null) || fail_matching session
+      # Validate the native transition before fm-lock may replace anything.
+      # An exact resume is the only owner-changing transition: it must retain
+      # the lineage session, name the dead lineage owner in the old lock, and
+      # arrive from the exact bound TraeX pane/process. UserPromptSubmit and
+      # sandboxed children never reach this mutation path.
+      fm_traex_primary_session_transition_valid "$RECORD" "$session_id" "$source" \
+        || fail_matching ownership-transition
+      if [ "$source" = resume ]; then
+        FM_ROOT_OVERRIDE="$FM_ROOT_REAL" FM_HOME="$FM_HOME_REAL" \
+          "$FM_ROOT_REAL/bin/fm-lock.sh" >/dev/null || fail_matching lock-convergence
+      fi
+      fm_traex_primary_proof_publish_session "$RECORD" "$session_id" "$source" \
+        || fail_matching ownership-proof
       write_primary_session "$session_id" "$source" || fail_matching session-write
       FM_ROOT_OVERRIDE="$FM_ROOT_REAL" FM_HOME="$FM_HOME_REAL" \
         "$FM_ROOT_REAL/bin/fm-sessionstart-run.sh" --source "$source"
       exit 0
       ;;
+    UserPromptSubmit)
+      session_id=$(printf '%s' "$payload" | jq -r '.session_id | strings | select(length > 0)' 2>/dev/null) || fail_matching session
+      # Read-only guard: SessionStart is the sole lineage/lock authority.
+      # This branch only confirms that TraeX delivered it first for the exact
+      # session, incarnation, pane, binding, and already-converged lock.
+      fm_traex_primary_lineage_guard "$RECORD" "$session_id" \
+        || fail_matching ownership-lineage
+      exit 0
+      ;;
+    PreToolUse)
+      session_id=$(printf '%s' "$payload" | jq -r '.session_id | strings | select(length > 0)' 2>/dev/null) || fail_matching session
+      fm_traex_primary_proof_publish_pretool "$RECORD" "$session_id" \
+        || fail_matching ownership-proof
+      exit 0
+      ;;
     Stop)
+      session_id=$(printf '%s' "$payload" | jq -r '.session_id | strings | select(length > 0)' 2>/dev/null) || fail_matching session
+      guard_status=0
       printf '%s' "$payload" | FM_ROOT_OVERRIDE="$FM_ROOT_REAL" FM_HOME="$FM_HOME_REAL" \
-        "$FM_ROOT_REAL/bin/fm-turnend-guard.sh"
-      exit $?
+        "$FM_ROOT_REAL/bin/fm-turnend-guard.sh" || guard_status=$?
+      fm_traex_primary_proof_retire "$RECORD" "$session_id" || fail_matching proof-retirement
+      exit "$guard_status"
+      ;;
+    SessionEnd)
+      session_id=$(printf '%s' "$payload" | jq -r '.session_id | strings | select(length > 0)' 2>/dev/null) || fail_matching session
+      fm_traex_primary_proof_retire "$RECORD" "$session_id" || fail_matching proof-retirement
+      exit 0
+      ;;
+    PostCompact)
+      session_id=$(printf '%s' "$payload" | jq -r '.session_id | strings | select(length > 0)' 2>/dev/null) || fail_matching session
+      fm_traex_primary_lineage_guard "$RECORD" "$session_id" \
+        || fail_matching ownership-lineage
+      FM_ROOT_OVERRIDE="$FM_ROOT_REAL" FM_HOME="$FM_HOME_REAL" \
+        "$FM_ROOT_REAL/bin/fm-sessionstart-run.sh" --source compact
+      exit 0
       ;;
     *) exit 0 ;;
   esac
@@ -452,7 +502,7 @@ case "$EVENT" in
     if [ "$EVENT" = Stop ]; then
       event_slug=stop
     else
-      event_slug=session-end
+      event_slug='session-end'
     fi
     session_id=$(printf '%s' "$payload" | jq -r '.session_id | strings | select(length > 0)' 2>/dev/null) || fail_matching session
     turn_id=$(printf '%s' "$payload" | jq -r '.turn_id | strings | select(length > 0)' 2>/dev/null) || fail_matching turn

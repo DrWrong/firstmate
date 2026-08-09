@@ -65,7 +65,7 @@ case "${1:-}" in
     command=$(jq -r '.hooks.SessionStart[-1].hooks[0].command' "$TRAECLI_HOME/hooks.json")
     session=sess-probe-1
     turn=turn-probe-1
-    for event in SessionStart UserPromptSubmit Stop SessionEnd; do
+    for event in SessionStart UserPromptSubmit PreToolUse Stop SessionEnd; do
       source=null
       [ "$event" != SessionStart ] || source='"startup"'
       payload=$(jq -cn --arg event "$event" --arg session "$session" --arg turn "$turn" \
@@ -74,6 +74,31 @@ case "${1:-}" in
       printf '%s' "$payload" | bash -c "$command" || exit $?
     done
     printf '%s\n' FIRSTMATE_TRAEX_PROBE
+    exit 0
+    ;;
+  primary-hooks)
+    dispatcher=$2
+    cwd=$3
+    state=$4
+    session=primary-session
+    turn=primary-turn
+    jq -cn --arg cwd "$cwd" --arg session "$session" --arg turn "$turn" \
+      '{hook_event_name:"SessionStart",cwd:$cwd,session_id:$session,turn_id:$turn,source:"startup"}' \
+      | "$dispatcher" > "$state/sessionstart.out" 2> "$state/sessionstart.err" || exit $?
+    jq -cn --arg cwd "$cwd" --arg session "$session" --arg turn "$turn" \
+      '{hook_event_name:"UserPromptSubmit",cwd:$cwd,session_id:$session,turn_id:$turn}' \
+      | "$dispatcher" > "$state/userprompt.out" 2> "$state/userprompt.err" || exit $?
+    jq -cn --arg cwd "$cwd" --arg session "$session" --arg turn "$turn" \
+      '{hook_event_name:"PreToolUse",cwd:$cwd,session_id:$session,turn_id:$turn,tool_name:"Bash",tool_input:{command:"true"}}' \
+      | "$dispatcher" > "$state/pretool.out" 2> "$state/pretool.err" || exit $?
+    stop_status=0
+    jq -cn --arg cwd "$cwd" --arg session "$session" --arg turn "$turn" \
+      '{hook_event_name:"Stop",cwd:$cwd,session_id:$session,turn_id:$turn}' \
+      | "$dispatcher" > "$state/stop.out" 2> "$state/stop.err" || stop_status=$?
+    printf '%s\n' "$stop_status" > "$state/stop.rc"
+    jq -cn --arg cwd "$cwd" --arg session "$session" --arg turn "$turn" \
+      '{hook_event_name:"SessionEnd",cwd:$cwd,session_id:$session,turn_id:$turn}' \
+      | "$dispatcher" > "$state/sessionend.out" 2> "$state/sessionend.err" || exit $?
     exit 0
     ;;
 esac
@@ -133,7 +158,7 @@ $rec
 EOF
   jq -e '.hooks.Stop[0].hooks[0].command == "printf user-hook"' "$cli_home/hooks.json" >/dev/null \
     || fail "installer did not preserve the existing user hook"
-  for event in SessionStart UserPromptSubmit Stop SessionEnd; do
+  for event in SessionStart UserPromptSubmit PreToolUse Stop SessionEnd PostCompact; do
     jq -e --arg event "$event" \
       'any(.hooks[$event][]; any(.hooks[]; .command | contains("fm-firstmate-hook.sh")))' \
       "$cli_home/hooks.json" >/dev/null || fail "installer omitted managed $event hook"
@@ -158,7 +183,7 @@ EOF
   mv "$case_dir/hooks.modified" "$cli_home/hooks.json"
   run_adapter "$cli_home" "$fakebin" "$INSTALL" install >/dev/null \
     || fail "reinstall over a modified managed entry failed"
-  for event in SessionStart UserPromptSubmit Stop SessionEnd; do
+  for event in SessionStart UserPromptSubmit PreToolUse Stop SessionEnd PostCompact; do
     count=$(jq --arg event "$event" --arg command "$managed_command" \
       '[.hooks[$event][] | .hooks[] | select(.command? == $command)] | length' \
       "$cli_home/hooks.json")
@@ -292,6 +317,7 @@ test_library_owned_binary_pin_renders_dispatcher() {
   alternate_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   mkdir -p "$cli_home" "$adapter_bin"
   cp "$ROOT/bin/fm-traex-lib.sh" "$adapter_bin/fm-traex-lib.sh"
+  cp "$ROOT/bin/fm-traex-primary-proof-lib.sh" "$adapter_bin/fm-traex-primary-proof-lib.sh"
   cp "$ROOT/bin/fm-traex-hook-install.sh" "$adapter_bin/fm-traex-hook-install.sh"
   cp "$ROOT/bin/fm-traex-hook-dispatch.sh" "$adapter_bin/fm-traex-hook-dispatch.sh"
   sed -e "s|^FM_TRAEX_SUPPORTED_VERSION=.*|FM_TRAEX_SUPPORTED_VERSION='$alternate_version'|" \
@@ -493,7 +519,7 @@ SH
 }
 
 test_primary_session_start_and_stop_guard() {
-  local rec case_dir cli_home fakebin state primary token_state dispatcher out status
+  local rec case_dir cli_home fakebin state primary token_state dispatcher out status primary_install
   rec=$(setup_adapter primary) || fail "primary setup failed"
   IFS='|' read -r case_dir cli_home fakebin <<EOF
 $rec
@@ -503,8 +529,13 @@ EOF
   mkdir -p "$primary/bin" "$primary/config" "$state"
   git -C "$primary" init -q
   printf '%s\n' 'worker=off' 'primary=on' 'secondmate=off' > "$primary/config/traex-adapter"
+  cp "$ROOT/bin/fm-traex-hook-install.sh" "$ROOT/bin/fm-traex-lib.sh" \
+    "$ROOT/bin/fm-traex-primary-proof-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" \
+    "$ROOT/bin/fm-lock.sh" "$primary/bin/"
+  primary_install="$primary/bin/fm-traex-hook-install.sh"
   cat > "$primary/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
+sed -n 's/^owner_pid=//p' "$FM_HOME/state/.traex-primary-lineage" > "$FM_HOME/state/.lock"
 printf 'SESSION_START_CONTEXT\n'
 printf '%s\n' "$*" > "$FM_HOME/state/sessionstart.args"
 SH
@@ -518,8 +549,22 @@ SH
   chmod +x "$primary/bin/fm-sessionstart-run.sh" "$primary/bin/fm-turnend-guard.sh"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
-case "$*" in
-  *'#{pane_id}'*) printf '%s\n' '%9' ;;
+case "${1:-}" in
+  display-message)
+    format=${!#}
+    case "$format" in *$'\t'*) ;; *) exit 90 ;; esac
+    case "$format" in *'\t'*) exit 91 ;; esac
+    case " $* " in
+      *' -c '*) printf '$9\t%%9\n' ;;
+      *) printf '/tmp/fm-test-tmux\t4242\t$9\t%%9\t777\t/dev/pts/9\t0\ttraex\n' ;;
+    esac
+    ;;
+  list-clients)
+    format=${!#}
+    case "$format" in *$'\t'*) ;; *) exit 90 ;; esac
+    case "$format" in *'\t'*) exit 91 ;; esac
+    printf '/dev/pts/90\t0\n'
+    ;;
   *) exit 2 ;;
 esac
 SH
@@ -527,35 +572,34 @@ SH
   token_state="$state/.traex-primary-hook-token"
   if out=$(env -u TMUX -u TMUX_PANE TRAECLI_HOME="$cli_home" PATH="$fakebin:$PATH" \
       FM_TEST_TRAEX_SHA="$SUPPORTED_SHA" FM_TEST_REAL_SHA256SUM="$REAL_SHA256SUM" \
-      "$INSTALL" bind-primary "$primary" "$primary" 2>&1); then
+      "$primary_install" bind-primary "$primary" "$primary" 2>&1); then
     fail "primary binding succeeded outside tmux"
   fi
   assert_contains "$out" 'requires the current process to run inside tmux' \
     "plain-terminal primary refusal did not identify the tmux boundary"
   assert_absent "$token_state" "plain-terminal primary refusal published a token"
   TMUX=fake TMUX_PANE=%9 run_adapter "$cli_home" "$fakebin" \
-    "$INSTALL" bind-primary "$primary" "$primary" >/dev/null \
+    "$primary_install" bind-primary "$primary" "$primary" >/dev/null \
     || fail "tmux primary binding failed"
   dispatcher="$cli_home/fm-firstmate-hook.sh"
 
-  out=$(payload SessionStart "$primary" primary-session turn-unused resume \
-    | run_adapter "$cli_home" "$fakebin" "$dispatcher") || fail "primary SessionStart routing failed"
+  TMUX=fake TMUX_PANE=%9 FM_HOME="$primary" run_adapter "$cli_home" "$fakebin" \
+    "$fakebin/traex" primary-hooks "$dispatcher" "$primary" "$state" \
+    || fail "primary native-hook sequence failed: $(cat "$state"/*.err 2>/dev/null || true)"
+  out=$(cat "$state/sessionstart.out")
   [ "$out" = SESSION_START_CONTEXT ] || fail "SessionStart stdout did not reach the caller/model context"
-  [ "$(cat "$state/sessionstart.args")" = '--source resume' ] \
+  [ "$(cat "$state/sessionstart.args")" = '--source startup' ] \
     || fail "SessionStart source was not routed exactly: $(cat "$state/sessionstart.args")"
   [ "$(sed -n 's/^session_id=//p' "$state/.traex-primary-session")" = primary-session ] \
     || fail "primary session identity was not persisted"
 
-  if out=$(payload Stop "$primary" primary-session primary-turn \
-      | run_adapter "$cli_home" "$fakebin" "$dispatcher" 2>&1); then
-    status=0
-  else
-    status=$?
-  fi
+  out=$(cat "$state/stop.err")
+  status=$(cat "$state/stop.rc")
   [ "$status" = 2 ] || fail "primary Stop guard returned $status, expected TraeX continuation status 2"
   assert_contains "$out" 'continue supervised work' "primary Stop guard feedback was not preserved"
   jq -e '.hook_event_name == "Stop" and .session_id == "primary-session"' "$state/guard.payload" >/dev/null \
     || fail "primary Stop payload was not delivered intact to the guard"
+  assert_absent "$state/.traex-primary-ownership-proof" "Stop did not retire sandbox tool authorization"
   pass "TraeX primary SessionStart stdout and Stop exit-2 supervision route through authoritative owners"
 }
 

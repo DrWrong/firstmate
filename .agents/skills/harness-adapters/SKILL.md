@@ -170,21 +170,23 @@ A send or key action reporting success is not proof that the intended action hap
 OpenCode can accept and queue an Enter while leaving text visible, Grok can consume Enter in its slash popup without submitting, and Kimi can silently drop a message sent before readiness even though the send returns success.
 The shared symptom is a healthy-looking pane with no work in progress, so each adapter must verify the observable postcondition that is specific to its TUI.
 
-## traex (FEATURE-GATED; local tmux only; live-verified 2026-08-08 on traecli 0.200.19 internal edition)
+## traex (FEATURE-GATED; local tmux only; live-verified 2026-08-09 on traecli 0.200.19 internal edition)
 
 | Fact | Value |
 |---|---|
 | Busy state | Trusted native `UserPromptSubmit` writes busy; `Stop` and `SessionEnd` write idle and append a deduplicated durable completion record. Any binary, hook, dispatcher, receipt, task-binding, cwd, or generation drift is `unknown traex-unverified`, never idle. |
 | Exit command | `/exit` (fires `SessionEnd` and exits to the recorded shell) |
 | Interrupt | single Escape, then `C-u` because TraeX restores the interrupted prompt; Firstmate records `fm-interrupt` idle only after delivery |
-| Resume | `FM_HOME=<owning-home> bin/fm-traex-resume.sh <task-id>`; only a dead agent in the exact recorded local tmux endpoint, and only after `SessionStart(source=resume)` confirms the recorded session id |
+| Resume | Workers and local secondmates use `FM_HOME=<owning-home> bin/fm-traex-resume.sh <task-id>` only from a dead exact recorded tmux endpoint. A bound primary accepts native exact-session resume only when `SessionStart(source=resume)` converges the dead old lock owner to its new TraeX process before the first prompt. |
 | Skill invocation | Natural language; no exact slash/dollar form is credited |
 
 The supported binary identity and model/effort matrix are pinned in `bin/fm-traex-lib.sh`; do not copy them into launch logic. The adapter is closed until `config/traex-adapter` opens the exact role and `bin/fm-traex-preflight.sh` proves the current native-trust receipt, binary, hooks, dispatcher, login, model, and effort. `secondmate=on` also requires `primary=on`.
 
-Trust handling is always native. Run `bin/fm-traex-hook-install.sh install`, inspect and accept the four Firstmate entries in TraeX's own hook-review UI, then run `bin/fm-traex-hook-install.sh probe --model GPT-5.6-Luna`. Never pass `--dangerously-bypass-hook-trust`, never edit TraeX's private trust store, and never mistake the UI notice `Hooks need review` for hook execution: live probing proved that notice means the hook was discovered but did not auto-run before approval. A quoting failure in an outer probe shell is a probe construction bug and establishes no hook semantic result; [`docs/verification/traex.md`](../../../docs/verification/traex.md) keeps those evidence classes separate.
+Trust handling is always native. Run `bin/fm-traex-hook-install.sh install`, inspect and accept the six Firstmate entries in TraeX's own hook-review UI, then run `bin/fm-traex-hook-install.sh probe --model GPT-5.6-Luna`. Never pass `--dangerously-bypass-hook-trust`, never edit TraeX's private trust store, and never mistake the UI notice `Hooks need review` for hook execution: live probing proved that notice means the hook was discovered but did not auto-run before approval. A quoting failure in an outer probe shell is a probe construction bug and establishes no hook semantic result; [`docs/verification/traex.md`](../../../docs/verification/traex.md) keeps those evidence classes separate.
 
 The installed hook is global but inactive by default. Only a Firstmate-created `.fm-traex-hook` pointer plus an owned private registry record for the exact canonical cwd/task/home/root/uid/generation activates it. Never hand-create, copy, or retarget those files. `bind-primary` / `unbind-primary` are the only primary binding controls; spawn and teardown own worker and secondmate bindings.
+
+For the primary, `bin/fm-traex-primary-proof-lib.sh` owns the exact attached-client/pane/process/home/session proof. `/clear` does not promise an immediate hook: accept either eager delivery or the verified lazy delivery on the first post-clear prompt, but require a fresh `SessionStart(clear)` with a new session id before that prompt's `UserPromptSubmit`. The prompt event is a read-only lineage guard and must never establish identity. Real compaction emits `PreCompact`/`PostCompact`; the managed `PostCompact` route re-emits context without inventing `SessionStart(compact)`. `PreToolUse` creates the short sandbox proof, while `Stop`/`SessionEnd` retire it. Never substitute child environment markers or pane text for these native events.
 
 Launch disables `plugins` and `plugin_hooks`, but leaves native hooks enabled and never bypasses their trust. It pins the exact absolute `HOME`, resolved `TRAE_HOME`, and authenticated `TRAECLI_HOME` that passed preflight; resume reuses the three values recorded in task metadata rather than ambient tmux-server state. Ordinary workers, scouts, the primary, and local tmux secondmates are the complete supported set. Remote secondmates and the Herdr, zellij, Orca, and cmux backends are explicit refusals; do not retry TraeX there or drive any Herdr lifecycle command while handling that refusal.
 

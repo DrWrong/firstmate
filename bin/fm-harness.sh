@@ -62,8 +62,10 @@ detect_own() {
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args
-  for _ in 1 2 3 4 5 6 7 8; do
+  local pid=$$ comm args proof
+  # Match the session-lock owner's 16-hop bound: native hook shells can be
+  # deeper than the legacy eight-hop window, but one walk is enough.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     case "$(basename -- "$comm")" in
       *claude*) echo claude; return ;;
@@ -96,6 +98,21 @@ detect_own() {
       break
     fi
   done
+  # Default-permission TraeX tools hide their host ancestry and must present the
+  # fresh PreToolUse proof published by the native hook. Keep that exceptional
+  # validation off every ordinary detector path: without the exact proof
+  # artifact there is nothing for the TraeX owner to authenticate.
+  proof="$FM_HOME/state/.traex-primary-ownership-proof"
+  if [ -f "$proof" ] && [ ! -L "$proof" ] \
+      && [ -f "$SCRIPT_DIR/fm-traex-primary-proof-lib.sh" ] \
+      && [ ! -L "$SCRIPT_DIR/fm-traex-primary-proof-lib.sh" ]; then
+    # shellcheck source=bin/fm-traex-primary-proof-lib.sh
+    . "$SCRIPT_DIR/fm-traex-primary-proof-lib.sh"
+    if fm_traex_primary_proof_owner_pid "$FM_HOME/state" >/dev/null 2>&1; then
+      echo traex
+      return
+    fi
+  fi
   echo unknown
 }
 

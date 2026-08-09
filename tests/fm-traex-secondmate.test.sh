@@ -61,6 +61,7 @@ printf '%s\n' "$*" >> "$FM_TEST_TMUX_LOG"
 case "${1:-}" in
   display-message)
     case "$*" in
+      *'#{socket_path}'*) printf '/tmp/fm-test-tmux\t1\t$1\t%%99\t999999\t/dev/pts/99\t0\ttraex\n' ;;
       *'#{pane_current_command}'*) cat "$FM_TEST_TMUX_MODE" ;;
       *'#{pane_current_path}'*) printf '%s\n' "$FM_TEST_SECONDMATE_HOME" ;;
       *'#{pane_pid}'*) printf '%s\n' 999999 ;;
@@ -68,6 +69,7 @@ case "${1:-}" in
       *) printf '%s\n' '@99' ;;
     esac
     ;;
+  list-clients) ;;
   list-windows)
     if [ -e "$FM_TEST_TMUX_WINDOW_STATE" ]; then
       case "$*" in
@@ -119,7 +121,7 @@ SH
       {protocol:"v1",version:"traecli 0.200.19(internal edition)",binary_path:$binary,
        binary_sha256:$binary_sha,hooks_sha256:$hooks_sha,dispatcher_sha256:$dispatcher_sha,
        probe_nonce_sha256:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-       events:["SessionStart","UserPromptSubmit","Stop","SessionEnd"],completed_at:1}' \
+       events:["SessionStart","UserPromptSubmit","PreToolUse","Stop","SessionEnd"],completed_at:1}' \
     > "$cli_home/fm-firstmate-receipt.json"
   chmod 600 "$cli_home/fm-firstmate-receipt.json"
   printf '%s|%s|%s|%s\n' "$parent" "$sub" "$fakebin" "$cli_home"
@@ -174,6 +176,7 @@ EOF
   assert_grep "fm_root_real=$sub" "$record" "secondmate hook binding points at parent code root"
 
   printf 'session_id=session-sm-1\nsource=startup\n' > "$sub/state/.traex-primary-session"
+  chmod 600 "$sub/state/.traex-primary-session"
   printf '%s\n' zsh > "${parent%/parent}/mode"
   mkdir -p "${parent%/parent}/wrong-home" "${parent%/parent}/wrong-trae" "${parent%/parent}/wrong-cli"
   out=$(FM_TEST_AMBIENT_HOME="${parent%/parent}/wrong-home" \

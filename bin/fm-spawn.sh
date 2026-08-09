@@ -2333,7 +2333,7 @@ if [ "$HARNESS" = traex ] && [ "$KIND" = secondmate ]; then
   }
   "$FM_ROOT/bin/fm-traex-hook-install.sh" register primary "$ID" "$WT" \
     "$SECONDMATE_STATE_REAL" "$PROJ_ABS" "$PROJ_ABS" - \
-    "$STATE_REAL/$ID.traex-hook-token" || {
+    "$STATE_REAL/$ID.traex-hook-token" "$T" "$CONFIG/traex-adapter" || {
       echo "error: refusing TraeX secondmate because its primary hook binding could not be registered" >&2
       exit 1
     }

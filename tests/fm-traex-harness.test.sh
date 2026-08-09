@@ -16,7 +16,7 @@ REAL_SHA256SUM=$(command -v sha256sum 2>/dev/null || true)
 [ -n "$REAL_SHA256SUM" ] || { echo 'skip: sha256sum not found'; exit 0; }
 
 test_exact_detection_and_session_lock_names() {
-  local dir bin out fakebin
+  local dir bin out fakebin chain
   dir="$TMP_ROOT/detection"
   mkdir -p "$dir"
   for bin in traex traecli; do
@@ -31,6 +31,21 @@ test_exact_detection_and_session_lock_names() {
       -u FM_TRAEX_HARNESS "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
     [ "$out" != traex ] || fail "inexact process ancestor $bin was misdetected as TraeX"
   done
+  chain=$dir/deep-chain.sh
+  cat > "$chain" <<'SH'
+#!/usr/bin/env bash
+depth=$1 harness=$2
+if [ "$depth" -eq 0 ]; then
+  "$harness"
+else
+  bash "$0" "$((depth - 1))" "$harness" &
+  wait "$!"
+fi
+SH
+  chmod +x "$chain"
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS \
+    -u FM_TRAEX_HARNESS "$dir/traex" "$chain" 9 "$HARNESS")
+  [ "$out" = traex ] || fail "deep native TraeX hook ancestry resolved '$out', expected traex"
   out=$(FM_TRAEX_HARNESS=traex CLAUDECODE=1 "$HARNESS")
   [ "$out" = claude ] || fail "existing higher-precedence Claude marker changed: $out"
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT FM_TRAEX_HARNESS=traex "$HARNESS")
@@ -136,7 +151,7 @@ SH
       {protocol:"v1",version:"traecli 0.200.19(internal edition)",binary_path:$binary,
        binary_sha256:$binary_sha,hooks_sha256:$hooks_sha,dispatcher_sha256:$dispatcher_sha,
        probe_nonce_sha256:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-       events:["SessionStart","UserPromptSubmit","Stop","SessionEnd"],completed_at:1}' \
+       events:["SessionStart","UserPromptSubmit","PreToolUse","Stop","SessionEnd"],completed_at:1}' \
     > "$cli_home/fm-firstmate-receipt.json"
   chmod 600 "$cli_home/fm-firstmate-receipt.json"
   printf '%s|%s|%s|%s|%s\n' "$home" "$proj" "$wt" "$fakebin" "$cli_home"

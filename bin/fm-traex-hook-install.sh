@@ -10,20 +10,23 @@
 #   fm-traex-hook-install.sh remove
 #
 # Internal task lifecycle commands (called by fm-spawn/fm-teardown):
-#   ... register <worker|primary> <task-id> <worktree> <state> <fm-root> <fm-home> <busy-gen|-> <token-state>
+#   ... register <worker|primary> <task-id> <worktree> <state> <fm-root> <fm-home> <busy-gen|-> <token-state> [<spawn-owned-tmux-target> <authoritative-gate-file>]
 #   ... unregister <worktree> <token-state>
 #
 # `install` merge-preserves every non-Firstmate hook and invalidates the receipt
 # when managed bytes change. It never edits TraeX's private trust store.
 # `probe` deliberately omits --dangerously-bypass-hook-trust: the native TraeX
 # review must already have accepted the exact installed hooks. Only observed
-# SessionStart/UserPromptSubmit/Stop/SessionEnd callbacks generate a receipt.
+# SessionStart/UserPromptSubmit/PreToolUse/Stop/SessionEnd callbacks generate a
+# receipt; PostCompact is a separately verified primary context-reemit route.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-traex-lib.sh
 . "$SCRIPT_DIR/fm-traex-lib.sh"
+# shellcheck source=bin/fm-traex-primary-proof-lib.sh
+. "$SCRIPT_DIR/fm-traex-primary-proof-lib.sh"
 
 usage() {
   sed -n '2,24{s/^# \{0,1\}//;p;}' "$0" >&2
@@ -154,7 +157,7 @@ validate_hooks_json() {  # <file>
     | type == "object"
     and ((.version // 1) == 1)
     and ((.hooks // {}) | type == "object")
-    and (["SessionStart","UserPromptSubmit","Stop","SessionEnd"]
+    and (["SessionStart","UserPromptSubmit","PreToolUse","Stop","SessionEnd","PostCompact"]
       | all(.[]; . as $event
         | (($root.hooks[$event] // []) | type == "array")
         and all(($root.hooks[$event] // [])[];
@@ -206,7 +209,7 @@ install_hook() {
     .version = (.version // 1)
     | .hooks = (.hooks // {})
     | {hooks:[{type:"command",command:$command,timeout:180}]} as $managed
-    | reduce ["SessionStart","UserPromptSubmit","Stop","SessionEnd"][] as $event
+    | reduce ["SessionStart","UserPromptSubmit","PreToolUse","Stop","SessionEnd","PostCompact"][] as $event
         (. ; .hooks[$event] = (((.hooks[$event] // [])
           | map(.hooks |= map(select((type != "object") or (.command? != $command))))
           | map(select((.hooks | length) > 0))) + [$managed]))
@@ -251,10 +254,13 @@ supported_material() {  # prints: binary|binary-sha|hooks-sha|dispatcher-sha
   printf '%s|%s|%s|%s\n' "$binary" "$binary_sha" "$hooks_sha" "$dispatcher_sha"
 }
 
-register_binding() {  # <role> <task> <worktree> <state> <root> <home> <gen|-> <token-state>
+register_binding() {  # <role> <task> <worktree> <state> <root> <home> <gen|-> <token-state> [<spawn-owned-tmux-target> <authoritative-gate-file>]
   local role=$1 task=$2 worktree=$3 state=$4 root=$5 home=$6 gen=$7 token_state=$8
+  local primary_target=${9:-} primary_client_policy=attached
+  local primary_gate=${10:-}
   local cli_home registry worktree_real state_real root_real home_real token_state_dir token_state_name
-  local token record pointer tmp token_tmp pointer_tmp old_umask exclude token_published=0 pointer_published=0 record_published=0
+  local token record pointer tmp token_tmp pointer_tmp old_umask exclude primary_material='' path
+  local token_published=0 pointer_published=0 record_published=0
   case "$role" in worker|primary) ;; *) printf 'error: invalid TraeX binding role\n' >&2; return 1 ;; esac
   case "$task" in ''|*[!A-Za-z0-9._-]*) printf 'error: invalid TraeX binding task id\n' >&2; return 1 ;; esac
   worktree_real=$(real_dir "$worktree") || return 1
@@ -265,10 +271,19 @@ register_binding() {  # <role> <task> <worktree> <state> <root> <home> <gen|-> <
   token_state_dir=$(real_dir "$(dirname -- "$token_state")") || return 1
   token_state_name=${token_state##*/}
   if [ "$role" = worker ]; then
+    [ -z "$primary_target$primary_gate" ] || { printf 'error: TraeX worker binding cannot name primary binding material\n' >&2; return 1; }
     [ "$token_state_dir" = "$state_real" ] && [ "$token_state_name" = "$task.traex-hook-token" ] \
       || { printf 'error: TraeX worker token state must use its owning state directory and task id\n' >&2; return 1; }
     case "$gen" in ''|-|*[!A-Za-z0-9._-]*) printf 'error: invalid TraeX busy generation\n' >&2; return 1 ;; esac
   else
+    if [ -n "$primary_target" ]; then
+      [ -n "$primary_gate" ] || { printf 'error: spawn-owned TraeX primary binding requires its authoritative gate file\n' >&2; return 1; }
+      case "$primary_target" in *[!A-Za-z0-9._:@%/-]*) printf 'error: invalid spawn-owned TraeX primary tmux target\n' >&2; return 1 ;; esac
+      primary_client_policy=spawn-owned
+    elif [ -n "$primary_gate" ]; then
+      printf 'error: manual TraeX primary binding cannot override its gate file\n' >&2
+      return 1
+    fi
     case "$token_state_name" in
       .traex-primary-hook-token|"$task.traex-hook-token") ;;
       *) printf 'error: invalid TraeX primary token-state name\n' >&2; return 1 ;;
@@ -323,6 +338,10 @@ register_binding() {  # <role> <task> <worktree> <state> <root> <home> <gen|-> <
       && [ "$(field "$record" adapter_version 2>/dev/null)" = "$FM_TRAEX_SUPPORTED_VERSION" ] \
       && [ "$(field "$record" token_state_real 2>/dev/null)" = "$token_state" ] \
       || { printf 'error: existing TraeX binding does not match the requested registration\n' >&2; return 1; }
+    if [ "$role" = primary ]; then
+      fm_traex_primary_binding_record_matches "$record" "$root_real" "$home_real" "$state_real" binding \
+        || { printf 'error: existing TraeX primary binding material or tmux identity drifted\n' >&2; return 1; }
+    fi
     if [ ! -e "$pointer" ] && [ ! -L "$pointer" ]; then
       old_umask=$(umask); umask 077
       pointer_tmp=$(mktemp "$worktree_real/.fm-traex-pointer.XXXXXXXX") || { umask "$old_umask"; return 1; }
@@ -344,6 +363,15 @@ register_binding() {  # <role> <task> <worktree> <state> <root> <home> <gen|-> <
     fi
     return 0
   fi
+  if [ "$role" = primary ]; then
+    for path in .traex-primary-ownership-proof .traex-primary-lineage .traex-primary-session; do
+      [ ! -e "$state_real/$path" ] && [ ! -L "$state_real/$path" ] \
+        || { printf 'error: stale TraeX primary ownership state must be retired before binding: %s\n' "$state_real/$path" >&2; return 1; }
+    done
+    primary_material=$(fm_traex_primary_binding_capture "$root_real" "$home_real" "$state_real" \
+      "${primary_target:-${TMUX_PANE:-}}" "$primary_client_policy" "$primary_gate") \
+      || { printf 'error: cannot capture the attached TraeX primary hook/tmux binding identity\n' >&2; return 1; }
+  fi
   old_umask=$(umask); umask 077
   tmp=$(mktemp "$registry/.fm-record.XXXXXXXX") || { umask "$old_umask"; return 1; }
   token_tmp=$token_state.tmp.$$
@@ -361,6 +389,7 @@ register_binding() {  # <role> <task> <worktree> <state> <root> <home> <gen|-> <
     printf 'uid=%s\n' "$(id -u)"
     printf 'adapter_version=%s\n' "$FM_TRAEX_SUPPORTED_VERSION"
     printf 'token_state_real=%s\n' "$token_state"
+    [ "$role" != primary ] || printf '%s\n' "$primary_material"
   } > "$tmp" || { rm -f "$tmp"; umask "$old_umask"; return 1; }
   if ! chmod 600 "$tmp" \
       || ! printf '%s\n' "$token" > "$token_tmp" \
@@ -393,19 +422,20 @@ register_binding() {  # <role> <task> <worktree> <state> <root> <home> <gen|-> <
 }
 
 require_current_tmux() {
-  local pane
+  local pane snapshot
   [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] \
     || { printf 'error: TraeX primary binding requires the current process to run inside tmux\n' >&2; return 1; }
   command -v tmux >/dev/null 2>&1 \
     || { printf 'error: TraeX primary binding requires tmux\n' >&2; return 1; }
-  pane=$(tmux display-message -p '#{pane_id}' 2>/dev/null) \
-    || { printf 'error: cannot verify the current tmux pane for TraeX primary binding\n' >&2; return 1; }
+  snapshot=$(fm_traex_proof_tmux_snapshot 2>/dev/null) \
+    || { printf 'error: cannot verify an attached foreground tmux client on the current pane for TraeX primary binding\n' >&2; return 1; }
+  pane=$(printf '%s\n' "$snapshot" | sed -n '4p')
   [ "$pane" = "$TMUX_PANE" ] \
     || { printf 'error: TraeX primary binding tmux pane identity does not match the current process\n' >&2; return 1; }
 }
 
 unregister_binding() {  # <worktree> <token-state>
-  local worktree=$1 token_state=$2 worktree_real token registry record pointer record_wt
+  local worktree=$1 token_state=$2 worktree_real token registry record pointer record_wt role state_real task_id
   [ -e "$token_state" ] || [ -L "$token_state" ] || return 0
   regular_owned "$token_state" || { printf 'error: unsafe TraeX token state: %s\n' "$token_state" >&2; return 1; }
   token=$(cat "$token_state" 2>/dev/null || true)
@@ -418,6 +448,19 @@ unregister_binding() {  # <worktree> <token-state>
   if [ -n "$worktree_real" ] && [ "$worktree_real" != "$record_wt" ]; then
     printf 'error: TraeX registry worktree does not match teardown target\n' >&2
     return 1
+  fi
+  role=$(field "$record" role 2>/dev/null) || return 1
+  if [ "$role" = primary ]; then
+    state_real=$(field "$record" state_real 2>/dev/null) || return 1
+    task_id=$(field "$record" task_id 2>/dev/null) || return 1
+    if [ -d "$state_real" ] && [ ! -L "$state_real" ]; then
+      [ "$(real_dir "$state_real" 2>/dev/null)" = "$state_real" ] || return 1
+      fm_traex_primary_proof_retire_binding "$state_real" \
+        || { printf 'error: refusing to unbind unsafe TraeX primary ownership state\n' >&2; return 1; }
+    elif [ "$task_id" = primary ] || [ -e "$record_wt" ] || [ -L "$record_wt" ]; then
+      printf 'error: TraeX primary ownership state disappeared before its bound home was removed\n' >&2
+      return 1
+    fi
   fi
   pointer=$record_wt/.fm-traex-hook
   if [ -e "$pointer" ] || [ -L "$pointer" ]; then
@@ -489,7 +532,9 @@ EOF
   printf 'token=%s\n' "$token" > "$project/.fm-traex-hook"
   chmod 600 "$token_state" "$project/.fm-traex-hook"
   printf 'probe: TraeX will run without hook-trust bypass; if native review appears, review and trust the installed Firstmate entries, then rerun this command.\n' >&2
-  if (CDPATH='' cd "$project" && TRAECLI_HOME="$cli_home" "$binary" exec -y --disable plugins --disable plugin_hooks -m "$model" "Reply exactly FIRSTMATE_TRAEX_PROBE_$nonce and do not use tools.") > "$lab/traex.out" 2> "$lab/traex.err"; then
+  if (CDPATH='' cd "$project" && TRAECLI_HOME="$cli_home" "$binary" exec -y --disable plugins --disable plugin_hooks -m "$model" \
+      "Use the Bash tool exactly once to run: printf '%s\\n' FIRSTMATE_TRAEX_TOOL_$nonce . Then reply exactly FIRSTMATE_TRAEX_PROBE_$nonce.") \
+      > "$lab/traex.out" 2> "$lab/traex.err"; then
     rc=0
   else
     rc=$?
@@ -502,7 +547,7 @@ EOF
     printf 'error: TraeX receipt probe exited %s; evidence preserved at %s\n' "$rc" "$lab" >&2
     return 1
   fi
-  for event in SessionStart UserPromptSubmit Stop SessionEnd; do
+  for event in SessionStart UserPromptSubmit PreToolUse Stop SessionEnd; do
     if ! grep -Fq "nonce=$nonce event=$event " "$proof" 2>/dev/null; then
       printf 'error: trusted TraeX hook did not deliver %s; evidence preserved at %s (native trust may still be pending)\n' "$event" "$lab" >&2
       return 1
@@ -528,7 +573,7 @@ EOF
       {protocol:$protocol,binary_path:$binary_path,binary_sha256:$binary_sha256,version:$version,
        hooks_sha256:$hooks_sha256,dispatcher_sha256:$dispatcher_sha256,
        probe_nonce_sha256:$probe_nonce_sha256,
-       events:["SessionStart","UserPromptSubmit","Stop","SessionEnd"],completed_at:$completed_at}
+       events:["SessionStart","UserPromptSubmit","PreToolUse","Stop","SessionEnd"],completed_at:$completed_at}
     ' > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$receipt"; then
     rm -f "$tmp"
     return 1
@@ -562,7 +607,7 @@ remove_hook() {
   work=$(mktemp -d "$cli_home/.fm-traex-remove.XXXXXXXX") || return 1
   candidate=$work/hooks.after
   jq --arg command "$command" '
-    reduce ["SessionStart","UserPromptSubmit","Stop","SessionEnd"][] as $event
+    reduce ["SessionStart","UserPromptSubmit","PreToolUse","Stop","SessionEnd","PostCompact"][] as $event
         (. ; if .hooks[$event] then
           .hooks[$event] |= (map(.hooks |= map(select((type != "object") or (.command? != $command))))
             | map(select((.hooks | length) > 0)))
@@ -598,8 +643,8 @@ case "$action" in
     probe_hook "$3"
     ;;
   register)
-    [ "$#" -eq 9 ] || usage
-    register_binding "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"
+    { [ "$#" -eq 9 ] || [ "$#" -eq 11 ]; } || usage
+    register_binding "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10:-}" "${11:-}"
     ;;
   unregister)
     [ "$#" -eq 3 ] || usage

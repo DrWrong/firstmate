@@ -29,6 +29,7 @@ It takes `--source <name>` when the adapter knows the source natively, and other
 
 This deliberately inverts the previous nudge matcher, which fired on `startup|resume|clear` and excluded `compact`.
 Compaction is now covered because a compacted session has lost exactly the digest it needs, and resume is now excluded from the run because it restores that digest instead of losing it.
+The names in this table are wrapper routing names, not a claim that every harness reports them through `SessionStart`: TraeX 0.200.19 reports real compaction as `PreCompact` then `PostCompact`, and its reviewed `PostCompact` handler supplies wrapper source `compact` after validating the unchanged lineage.
 
 Current harness ownership of the lock and its matching `state/.session-start-complete` record together are the idempotency interlock for the whole scheme.
 The full digest clears that completion record after acquiring the lock and republishes the lock owner's pid only after every stage completes, so `clear` or `compact` cannot skip startup sweeps after a truncated run.
@@ -72,7 +73,7 @@ A lock another session holds and a truncated digest therefore surface as digest 
 | Pi / pi-signed | Run | `.pi/extensions/fm-primary-turnend-guard.ts` maps `session_start` reasons `startup`, `new`, `resume`, and `fork` onto wrapper sources, handles `session_compact` as the compaction equivalent, and injects the output with `pi.sendMessage`. | The custom message reaches model context without racing an initial positional prompt. Pi's `reload` reason is deliberately unmapped, as it always was. |
 | OpenCode | Nudge | `.opencode/plugins/fm-primary-sessionstart-nudge.js` listens for `session.created`, runs once per session id, and calls `client.session.promptAsync` only when the wrapper prints a nudge. | Interactive TUI delivery is supported; headless `opencode run` is intentionally fail-open because the process can exit before the queued turn. That early exit is also why OpenCode cannot use the run tier. |
 | Grok | Nudge | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project hook runs when the checkout is trusted, but Grok currently discards hook stdout from model context, so this path is intentionally fail-open and cannot use the run tier. |
-| TraeX | Run | The native-trust-reviewed user hook installed by `bin/fm-traex-hook-install.sh` binds this checkout through its opaque primary token and invokes `bin/fm-sessionstart-run.sh` from the validated registry record. | Hook stdout reaches model context. Startup and resume sources are native; receipt verification must pass before `bind-primary`, and unbound sessions are inert. |
+| TraeX | Run | The native-trust-reviewed user hook installed by `bin/fm-traex-hook-install.sh` binds this checkout through its opaque primary token and invokes `bin/fm-sessionstart-run.sh` from the validated registry record. | Hook stdout reaches model context. `SessionStart` sources `startup`, `clear`, and `resume` are native; clear may activate on its first prompt. Native `PostCompact` supplies the separate `compact` re-emit route. Receipt verification must pass before `bind-primary`, and unbound sessions are inert. |
 
 Pi is the only adapter that injects a message rather than hook stdout, so whatever it injects must carry operational provenance or the Ahoy skill would have to guess whether it was captain-authored.
 The extension therefore encodes an unencoded digest as `session-start` operational input before sending it, and leaves the already-encoded nudge alone.
@@ -93,7 +94,7 @@ It proves the run wrapper's source routing end to end against a real `fm-session
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` exercise native startup paths with first-message and later-message Ahoy regressions.
 `tests/fm-sessionstart-hook-live-e2e.test.sh` is the opt-in live guard for the tracked Claude, Codex, and Pi run-tier adapters.
 It verifies their context-preserving reopen sources and context-reset delivery wherever the tracked TUI surface is reachable.
-`tests/fm-traex-hook.test.sh` covers TraeX's trusted primary transport portably, while [`verification/traex.md`](verification/traex.md) owns its separate real-binary startup and resume evidence.
+`tests/fm-traex-hook.test.sh` and `tests/fm-traex-primary-proof.test.sh` cover TraeX's trusted primary transport, prompt guard, clear activation, PostCompact routing, and resume lock convergence portably, while [`verification/traex.md`](verification/traex.md) owns its separate real-binary evidence.
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery.
 
 [`verification/supervision.md`](verification/supervision.md#native-session-start-delivery) records the active version-scoped transport evidence.

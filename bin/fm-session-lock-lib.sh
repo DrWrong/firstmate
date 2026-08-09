@@ -16,6 +16,17 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^traex$|^traecli$|^pi$|^pi-signed
 # basename and is deliberately absent here.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
 
+# TraeX default-permission tools run in a private PID namespace. The optional
+# proof library keeps their fail-closed, native-hook-backed exception in this
+# same authoritative owner rather than widening generic harness ancestry.
+FM_SESSION_LOCK_LIB_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)"
+if [ -f "$FM_SESSION_LOCK_LIB_DIR/fm-traex-primary-proof-lib.sh" ] \
+    && [ ! -L "$FM_SESSION_LOCK_LIB_DIR/fm-traex-primary-proof-lib.sh" ]; then
+  # shellcheck source=bin/fm-traex-primary-proof-lib.sh
+  # shellcheck disable=SC1091 # resolved beside this tracked library at runtime
+  . "$FM_SESSION_LOCK_LIB_DIR/fm-traex-primary-proof-lib.sh"
+fi
+
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
 #
@@ -137,6 +148,29 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+# Print the session owner visible to this caller. Normal harness ancestry stays
+# authoritative. Only when it is genuinely absent may a valid TraeX PreToolUse
+# proof name the already-locked host TraeX process.
+fm_session_owner_pid() { # <state-dir>
+  local state=$1 pid
+  if pid=$(fm_harness_ancestry_pid); then
+    printf '%s\n' "$pid"
+    return 0
+  fi
+  declare -F fm_traex_primary_proof_owner_pid >/dev/null 2>&1 || return 1
+  fm_traex_primary_proof_owner_pid "$state"
+}
+
+# True if lock pid $2 is live for state $1. A proof can attest only its exact
+# already-published owner; it cannot make an arbitrary or competing pid live.
+fm_session_lock_pid_alive() { # <state-dir> <pid>
+  local state=$1 pid=$2 proof_pid
+  fm_harness_pid_alive "$pid" && return 0
+  declare -F fm_traex_primary_proof_owner_pid >/dev/null 2>&1 || return 1
+  proof_pid=$(fm_traex_primary_proof_owner_pid "$state" 2>/dev/null) || return 1
+  [ "$proof_pid" = "$pid" ]
+}
+
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
 # of the current process: this script runs inside the session that owns the
 # home's fleet lock. Membership is the honest test of that question, because the
@@ -146,16 +180,21 @@ fm_harness_pid_alive() {
 # lock, a malformed lock, a lock held by a harness outside this ancestry, or an
 # ancestry that cannot be resolved all fail closed.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid pids pid proof_pid
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  pids=$(fm_harness_ancestry_pids) || return 1
-  while IFS= read -r pid; do
-    [ "$pid" = "$lock_pid" ] && return 0
-  done <<EOF
+  if pids=$(fm_harness_ancestry_pids); then
+    while IFS= read -r pid; do
+      [ "$pid" = "$lock_pid" ] && return 0
+    done <<EOF
 $pids
 EOF
+  fi
+  if declare -F fm_traex_primary_proof_owner_pid >/dev/null 2>&1; then
+    proof_pid=$(fm_traex_primary_proof_owner_pid "$state" 2>/dev/null) || return 1
+    [ "$proof_pid" = "$lock_pid" ] && return 0
+  fi
   return 1
 }

@@ -288,7 +288,7 @@ fm_traex_receipt_verify() {  # prints resolved binary on success
     and (.hooks_sha256 | strings | test("^[0-9a-f]{64}$"))
     and (.dispatcher_sha256 | strings | test("^[0-9a-f]{64}$"))
     and (.probe_nonce_sha256 | strings | test("^[0-9a-f]{64}$"))
-    and .events == ["SessionStart","UserPromptSubmit","Stop","SessionEnd"]
+    and .events == ["SessionStart","UserPromptSubmit","PreToolUse","Stop","SessionEnd"]
     and (.completed_at | type == "number")
   ' "$receipt" >/dev/null 2>&1 || { printf 'error: TraeX trust receipt is malformed or unsupported: %s\n' "$receipt" >&2; return 1; }
   binary=$(fm_traex_binary) || return 1
