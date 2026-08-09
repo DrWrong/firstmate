@@ -86,7 +86,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|muse|traex)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. pi-signed launches that exact executable name from PATH and
@@ -211,6 +211,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-traex-lib.sh
+. "$SCRIPT_DIR/fm-traex-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -380,6 +382,12 @@ spawn_remote_secondmate() {
     harness=$positional
   else
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
+  fi
+  if [ "$harness" = traex ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate with harness=traex is excluded; TraeX is supported only for local tmux secondmates" >&2
+    return 1
   fi
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi) ;;
@@ -630,6 +638,7 @@ SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+TRAEX_BINDING_REGISTERED=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -650,6 +659,11 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "${TRAEX_BINDING_REGISTERED:-0}" = 1 ]; then
+    TRAEX_BINDING_REGISTERED=0
+    "$FM_ROOT/bin/fm-traex-hook-install.sh" unregister "${WT:-}" \
+      "$STATE/$ID.traex-hook-token" >/dev/null 2>&1 || true
+  fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -789,7 +803,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse|traex)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -877,6 +891,10 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # TraeX hooks are user-level and native-trust reviewed. The launch disables
+    # plugin hook mutation but never bypasses hook trust. The explicit marker
+    # survives into tool subprocesses; exact ancestry remains the fallback.
+    traex) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS HOME=__TRAEXOSHOME__ TRAE_HOME=__TRAEXHOME__ TRAECLI_HOME=__TRAECLIHOME__ FM_TRAEX_HARNESS=traex __TRAEXBIN__ -y --disable plugins --disable plugin_hooks __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -885,9 +903,25 @@ case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
     HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+    if ! command -v node >/dev/null 2>&1; then
+      echo "error: cannot safely resolve a raw launch command without node" >&2
+      exit 1
+    fi
+    RAW_TRAEX_CLASS=$(node "$FM_ROOT/bin/fm-traex-raw-command-policy.mjs" --command "$LAUNCH" 2>/dev/null) || {
+      echo "error: cannot safely resolve the raw launch command" >&2
+      exit 1
+    }
+    case "$RAW_TRAEX_CLASS" in
+      traex)
+        echo "error: TraeX raw launch commands are forbidden; select harness=traex so Firstmate can enforce the canonical binary, homes, flags, and native hook trust" >&2
+        exit 1
+        ;;
+      other) ;;
+      *)
+        echo "error: cannot safely resolve the raw launch command" >&2
+        exit 1
+        ;;
+    esac
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -960,6 +994,29 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
   fi
+fi
+
+# TraeX is a tmux-only adapter in this delivery. Its explicit role gate,
+# authenticated model catalog, supported binary identity, hook feature, and
+# trust receipt are all checked before a worktree or endpoint is created.
+TRAE_BIN=
+TRAE_OS_HOME=
+TRAE_RUNTIME_HOME=
+TRAE_CLI_HOME=
+if [ "$HARNESS" = traex ]; then
+  [ "$BACKEND" = tmux ] || {
+    echo "error: TraeX backend '$BACKEND' is not live-verified; tmux is the only supported backend" >&2
+    exit 1
+  }
+  if [ "$KIND" = secondmate ]; then
+    TRAE_ROLE=secondmate
+  else
+    TRAE_ROLE=worker
+  fi
+  TRAE_BIN=$(fm_traex_preflight "$CONFIG" "$TRAE_ROLE" "$MODEL" "$EFFORT") || exit 1
+  TRAE_OS_HOME=$(fm_traex_os_home) || exit 1
+  TRAE_RUNTIME_HOME=$(fm_traex_runtime_home) || exit 1
+  TRAE_CLI_HOME=$(fm_traex_cli_home) || exit 1
 fi
 
 secondmate_registry_value() {
@@ -1049,7 +1106,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|muse|traex)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1102,6 +1159,14 @@ effort_flag_for_harness() {
         max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
       esac
       ;;
+    traex)
+      # Live-verified on traecli 0.200.19 with GPT-5.6-Luna: every shared
+      # Firstmate level is displayed exactly in the TUI. `max` remains subject
+      # to AGENTS.md's explicit-captain-only selection policy.
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+      esac
+      ;;
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
@@ -1109,6 +1174,16 @@ effort_flag_for_harness() {
     # task metadata but never reaches the launch command.
   esac
 }
+
+case "$LAUNCH" in
+  *__TRAEXBIN__*)
+    [ -n "$TRAE_BIN" ] || { echo "error: TraeX launch reached rendering without a preflighted binary" >&2; exit 1; }
+    LAUNCH=${LAUNCH//__TRAEXBIN__/$(shell_quote "$TRAE_BIN")}
+    LAUNCH=${LAUNCH//__TRAEXOSHOME__/$(shell_quote "$TRAE_OS_HOME")}
+    LAUNCH=${LAUNCH//__TRAEXHOME__/$(shell_quote "$TRAE_RUNTIME_HOME")}
+    LAUNCH=${LAUNCH//__TRAECLIHOME__/$(shell_quote "$TRAE_CLI_HOME")}
+    ;;
+esac
 
 case "$LAUNCH" in
   *__MUSEBIN__*)
@@ -1908,7 +1983,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|traex*)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2136,6 +2211,23 @@ EOF
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
       ;;
+    traex*)
+      # One native-trust-reviewed global dispatcher handles every lifecycle
+      # event. The opaque pointer and private record bind this worker to its
+      # exact cwd/task/gen; the receipt snapshot makes later binary/config/
+      # dispatcher drift classify unknown immediately.
+      fm_traex_snapshot_write "$STATE_REAL" "$ID" || {
+        echo "error: refusing TraeX spawn because its receipt snapshot could not be persisted" >&2
+        exit 1
+      }
+      "$FM_ROOT/bin/fm-traex-hook-install.sh" register worker "$ID" "$WT" \
+        "$STATE_REAL" "$FM_ROOT" "$FM_HOME" "$BUSY_GEN" \
+        "$STATE_REAL/$ID.traex-hook-token" || {
+          echo "error: refusing TraeX spawn because its task-scoped hook binding could not be registered" >&2
+          exit 1
+        }
+      TRAEX_BINDING_REGISTERED=1
+      ;;
   esac
 fi
 
@@ -2197,6 +2289,11 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  if [ "$HARNESS" = traex ]; then
+    echo "traex_os_home=$TRAE_OS_HOME"
+    echo "traex_home=$TRAE_RUNTIME_HOME"
+    echo "traex_cli_home=$TRAE_CLI_HOME"
+  fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   # Default-off writes no traceparent= line (meta stays byte-identical).
   # backend= is written only for a non-default (non-tmux) backend, so the
@@ -2228,6 +2325,20 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+
+if [ "$HARNESS" = traex ] && [ "$KIND" = secondmate ]; then
+  SECONDMATE_STATE_REAL=$(cd "$PROJ_ABS/state" && pwd -P) || {
+    echo "error: refusing TraeX secondmate because its state directory is not canonical" >&2
+    exit 1
+  }
+  "$FM_ROOT/bin/fm-traex-hook-install.sh" register primary "$ID" "$WT" \
+    "$SECONDMATE_STATE_REAL" "$PROJ_ABS" "$PROJ_ABS" - \
+    "$STATE_REAL/$ID.traex-hook-token" "$T" "$CONFIG/traex-adapter" || {
+      echo "error: refusing TraeX secondmate because its primary hook binding could not be registered" >&2
+      exit 1
+    }
+  TRAEX_BINDING_REGISTERED=1
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -2335,4 +2446,5 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
+TRAEX_BINDING_REGISTERED=0
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"

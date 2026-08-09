@@ -497,19 +497,27 @@ test_wide_composer_text_is_pending() {
 }
 
 test_all_tmux_harness_composers_share_classification() {
-  local dir fb capture out harness
+  local dir fb capture row_capture out harness
   dir="$TMP_ROOT/all-harness-composers"; mkdir -p "$dir"
   fb=$(make_fake_tmux "$dir")
   capture="$dir/styled.txt"
-  for harness in claude codex opencode pi pi-signed grok; do
+  for harness in claude codex opencode pi pi-signed grok traex; do
+    row_capture=
     case "$harness" in
       claude) printf '╭────────────╮\n│ ❯ \033[2mtry\033[0m      │\n╰────────────╯\n' > "$capture" ;;
       codex) printf '╭────────────╮\n│ › \033[2mtip\033[0m      │\n╰────────────╯\n' > "$capture" ;;
       opencode) printf '╭────────────╮\n│ >          │\n╰────────────╯\n' > "$capture" ;;
       pi|pi-signed) printf '╭────────────╮\n│            │\n╰────────────╯\n' > "$capture" ;;
       grok) printf '╭────────────╮\n│ ❯ \033[38;2;50;47;70mType\033[0m     │\n╰────────────╯\n' > "$capture" ;;
+      # Exact row shape captured from TraeX 0.200.19 on 2026-08-08:
+      # normal `❯`, followed by its dim `Find and fix a bug in @filename` hint.
+      traex)
+        row_capture="$dir/traex-row.txt"
+        printf '\033[0m\033[39m\033[49m❯ \033[2mFind and fix a bug in @filename\n' > "$row_capture"
+        printf '────────────────────────────────────────────────────────────────────────────────\n%s\n────────────────────────────────────────────────────────────────────────────────\n' "$(cat "$row_capture")" > "$capture"
+        ;;
     esac
-    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_ROW="$row_capture" FM_FAKE_CY=1 \
       fm_tmux_composer_state "fakepane")
     [ "$out" = empty ] \
       || fail "$harness aligned idle composer should be empty, got '$out'"
@@ -517,8 +525,12 @@ test_all_tmux_harness_composers_share_classification() {
       claude|grok) printf '╭────────────╮\n│ ❯ fix      │\n╰────────────╯\n' > "$capture" ;;
       codex) printf '╭────────────╮\n│ › fix      │\n╰────────────╯\n' > "$capture" ;;
       opencode|pi|pi-signed) printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$capture" ;;
+      traex)
+        printf '\033[0m\033[39m\033[49m❯ fix\n' > "$row_capture"
+        printf '────────────────────────────────────────────────────────────────────────────────\n%s\n────────────────────────────────────────────────────────────────────────────────\n' "$(cat "$row_capture")" > "$capture"
+        ;;
     esac
-    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_ROW="$row_capture" FM_FAKE_CY=1 \
       fm_tmux_composer_state "fakepane")
     [ "$out" = pending ] \
       || fail "$harness composer with text should be pending, got '$out'"

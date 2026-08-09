@@ -1,6 +1,6 @@
 ---
 name: harness-adapters
-description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, and muse.
+description: Agent-only reference for firstmate harness operations. Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter. Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, muse, and TraeX.
 user-invocable: false
 metadata:
   internal: true
@@ -47,14 +47,15 @@ Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-si
 On `unknown`, ask the captain instead of guessing.
 A captain override always beats detection.
 When verifying a new adapter, record its env marker and command name in `bin/fm-harness.sh`.
+TraeX uses only the exact Firstmate launch marker `FM_TRAEX_HARNESS=traex` and exact `traex` / `traecli` ancestry names; never broaden those to a substring match.
 
 For stuck recovery, the target window's harness is recorded as `harness=` in `state/<id>.meta`.
 Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 ## Primary turn-end guard
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, and `grok` have empirically validated hook paths for the "no turn ends blind" guard.
-`claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
+The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and feature-gated local-tmux `traex` have empirically validated hook paths for the "no turn ends blind" guard.
+`claude`, `codex`, and `traex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
 `opencode`, `pi`, and `pi-signed` expose passive lifecycle callbacks and force one bounded follow-up when the shared predicate blocks.
 Grok selects native blocking or its pre-native bounded resume fallback from the exact running Stop payload; [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns that contract.
 Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
@@ -94,7 +95,7 @@ Before inspecting or changing session-open behavior, read `docs/sessionstart-nud
 At session start, `bin/fm-session-start.sh` prints exactly one watcher supervision block for the detected primary harness.
 Do not substitute another harness's wait shape when resuming supervision.
 Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenless re-arm around `bin/fm-watch-arm.sh`, and Grok uses tracked background-notify cycles around `bin/fm-watch-arm.sh`.
-Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
+Codex and TraeX use bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because neither has a live-verified tracked background completion surface that reliably reawakens the model.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi and pi-signed use the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions the Pi engine auto-discovers once trusted.
 When changing any primary watcher adapter, update `docs/supervision-protocols/`, `docs/turnend-guard.md` if a shared idle or turn-end hook changed, and the relevant concise fact below.
@@ -123,6 +124,7 @@ The supported launch-profile flags below are verified locally; each row records 
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
+| traex | `--model GPT-5.6-Luna` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'` | Verified 2026-08-08 on `traecli 0.200.19(internal edition)`. Every shared level rendered exactly for this model; `max` remains explicit-captain-only. Worker/scout/local-secondmate launches require both axes explicitly, and a catalog-visible model is not accepted without separate live effort evidence. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
 No script resolves that split for you: establish which credential store a tuple reads from the discovery surfaces below plus `quota-axi auth --json`'s per-provider sources, and show that reasoning rather than inferring it from a harness, model, or source name.
@@ -140,13 +142,14 @@ Use the discovery surface in the current authenticated environment because suppo
 | pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 | grok | Run `grok models`, which lists the models available to the current Grok installation and account. |
 | kimi | Run `kimi provider list --json`, which lists the current provider and model configuration. |
+| traex | Run `traex models --json`; Firstmate preflight repeats this authenticated lookup and refuses unless the supported model exactly matches `.real_name` or `.name`. |
 
 For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing from a name or prefix.
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
 A discovery surface you could not reach establishes nothing; report that as uncertainty rather than turning it into a supported or unsupported verdict.
 
-When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
-This preserves launch success instead of passing a known-bad value.
+Except for TraeX's fail-closed profile gate, when a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
+This preserves launch success instead of passing a known-bad value, while TraeX refuses before endpoint creation.
 
 ## no-mistakes skill invocation
 
@@ -159,12 +162,35 @@ Natural language is acceptable if uncertain.
 - pi and pi-signed: no separate verified skill invocation beyond normal command behavior; use natural language if the exact skill command is uncertain.
 - grok: `/<skill>`, for example `/no-mistakes` (same form as claude). Verified end to end: grok discovers the user-level `no-mistakes` skill, `/no-mistakes` invokes it, and grok drives a real `no-mistakes axi run`. Like codex's `$`/`/` popups, typing `/<skill>` opens grok's slash-autocomplete, so a too-fast Enter selects the popup entry instead of sending, and for an argument-taking command (like `/no-mistakes`'s optional task-first argument) that first Enter only expands the popup selection into an argument-hint placeholder rather than submitting - a genuine second Enter is required (see the grok section below for the 2026-07-03 incident and fix). `fm_tmux_submit_core`'s retried Enter (used by `fm-send` on the tmux backend) handles this through the structural composer reader; the herdr backend needed a dedicated fix (`fm_backend_herdr_composer_state`, docs/herdr-backend.md) because its prior delta-based verification false-positived on that same popup-close content change.
 - kimi: `/<skill>`, for example `/no-mistakes`.
+- traex: use natural language, for example `Run the no-mistakes skill now`; no dedicated TraeX skill-command spelling is live-verified.
 
 ## Submission acknowledgement hazards
 
 A send or key action reporting success is not proof that the intended action happened.
 OpenCode can accept and queue an Enter while leaving text visible, Grok can consume Enter in its slash popup without submitting, and Kimi can silently drop a message sent before readiness even though the send returns success.
 The shared symptom is a healthy-looking pane with no work in progress, so each adapter must verify the observable postcondition that is specific to its TUI.
+
+## traex (FEATURE-GATED; local tmux only; live-verified 2026-08-09 on traecli 0.200.19 internal edition)
+
+| Fact | Value |
+|---|---|
+| Busy state | Trusted native `UserPromptSubmit` writes busy; `Stop` and `SessionEnd` write idle and append a deduplicated durable completion record. Any binary, hook, dispatcher, receipt, task-binding, cwd, or generation drift is `unknown traex-unverified`, never idle. |
+| Exit command | `/exit` (fires `SessionEnd` and exits to the recorded shell) |
+| Interrupt | single Escape, then `C-u` because TraeX restores the interrupted prompt; Firstmate records `fm-interrupt` idle only after delivery |
+| Resume | Workers and local secondmates use `FM_HOME=<owning-home> bin/fm-traex-resume.sh <task-id>` only from a dead exact recorded tmux endpoint. A bound primary accepts native exact-session resume only when `SessionStart(source=resume)` converges the dead old lock owner to its new TraeX process before the first prompt. |
+| Skill invocation | Natural language; no exact slash/dollar form is credited |
+
+The supported binary identity and model/effort matrix are pinned in `bin/fm-traex-lib.sh`; do not copy them into launch logic. The adapter is closed until `config/traex-adapter` opens the exact role and `bin/fm-traex-preflight.sh` proves the current native-trust receipt, binary, hooks, dispatcher, login, model, and effort. `secondmate=on` also requires `primary=on`.
+
+Trust handling is always native. Run `bin/fm-traex-hook-install.sh install`, inspect and accept the six Firstmate entries in TraeX's own hook-review UI, then run `bin/fm-traex-hook-install.sh probe --model GPT-5.6-Luna`. Never pass `--dangerously-bypass-hook-trust`, never edit TraeX's private trust store, and never mistake the UI notice `Hooks need review` for hook execution: live probing proved that notice means the hook was discovered but did not auto-run before approval. A quoting failure in an outer probe shell is a probe construction bug and establishes no hook semantic result; [`docs/verification/traex.md`](../../../docs/verification/traex.md) keeps those evidence classes separate.
+
+The installed hook is global but inactive by default. Only a Firstmate-created `.fm-traex-hook` pointer plus an owned private registry record for the exact canonical cwd/task/home/root/uid/generation activates it. Never hand-create, copy, or retarget those files. `bind-primary` / `unbind-primary` are the only primary binding controls; spawn and teardown own worker and secondmate bindings.
+
+For the primary, `bin/fm-traex-primary-proof-lib.sh` owns the exact attached-client/pane/process/home/session proof. `/clear` does not promise an immediate hook: accept either eager delivery or the verified lazy delivery on the first post-clear prompt, but require a fresh `SessionStart(clear)` with a new session id before that prompt's `UserPromptSubmit`. The prompt event is a read-only lineage guard and must never establish identity. Real compaction emits `PreCompact`/`PostCompact`; the managed `PostCompact` route re-emits context without inventing `SessionStart(compact)`. `PreToolUse` creates the short sandbox proof, while `Stop`/`SessionEnd` retire it. Never substitute child environment markers or pane text for these native events.
+
+Launch disables `plugins` and `plugin_hooks`, but leaves native hooks enabled and never bypasses their trust. It pins the exact absolute `HOME`, resolved `TRAE_HOME`, and authenticated `TRAECLI_HOME` that passed preflight; resume reuses the three values recorded in task metadata rather than ambient tmux-server state. Ordinary workers, scouts, the primary, and local tmux secondmates are the complete supported set. Remote secondmates and the Herdr, zellij, Orca, and cmux backends are explicit refusals; do not retry TraeX there or drive any Herdr lifecycle command while handling that refusal.
+
+TraeX uses the shared structural composer classifier and submit acknowledgement. Its bordered composer can contain ANSI-colored placeholder text; never infer empty/busy from visible text alone. Escape restores real pending text, which is why `fm-send` must clear with `C-u` before another message.
 
 ## claude (VERIFIED; busy-state hooks live-verified 2026-07-28 on Claude Code 2.1.220)
 

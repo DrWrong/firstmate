@@ -626,6 +626,20 @@ remove_kimi_turnend_auth() {
   rm -f "$hooks_dir/$token"
 }
 
+remove_traex_binding() {  # <state-dir> <id> <worktree-or-home> <meta>
+  local state_dir=$1 id=$2 worktree=$3 meta=$4 token_state os_home trae_home cli_home recorded_home
+  token_state=$state_dir/$id.traex-hook-token
+  [ -e "$token_state" ] || [ -L "$token_state" ] || return 0
+  os_home=$(fm_meta_get "$meta" traex_os_home)
+  trae_home=$(fm_meta_get "$meta" traex_home)
+  cli_home=$(fm_meta_get "$meta" traex_cli_home)
+  for recorded_home in "$os_home" "$trae_home" "$cli_home"; do
+    case "$recorded_home" in /*) ;; *) echo "error: TraeX binding for $id has an unsafe recorded identity root" >&2; return 1 ;; esac
+  done
+  HOME="$os_home" TRAE_HOME="$trae_home" TRAECLI_HOME="$cli_home" \
+    "$SCRIPT_DIR/fm-traex-hook-install.sh" unregister "$worktree" "$token_state"
+}
+
 retire_busy_state() {
   local state_dir=$1 id=$2 gen=${3:-}
   if [ -n "$gen" ]; then
@@ -1171,7 +1185,7 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$|\.fm-traex-hook$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2155,6 +2169,7 @@ cleanup_firstmate_home_children() {
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
     fi
+    remove_traex_binding "$sub_state" "$child_id" "$child_wt" "$child_meta" || return 1
     remove_grok_turnend_auth "$sub_state" "$child_id"
     remove_kimi_turnend_auth "$sub_state" "$child_id"
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
@@ -2163,9 +2178,13 @@ cleanup_firstmate_home_children() {
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
+    rmdir "$sub_state/$child_id.traex-callback.lock" 2>/dev/null || true
+    rm -rf "$sub_state/$child_id.traex-completions"
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
+      "$sub_state/$child_id.traex-hook-token" "$sub_state/$child_id.traex-receipt" \
+      "$sub_state/$child_id.traex-session" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current"
   done
 }
@@ -2431,6 +2450,7 @@ if [ "$KIND" = secondmate ]; then
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
 fi
+remove_traex_binding "$STATE" "$ID" "$WT" "$META" || exit 1
 remove_grok_turnend_auth "$STATE" "$ID"
 remove_kimi_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
@@ -2439,9 +2459,13 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+rmdir "$STATE/$ID.traex-callback.lock" 2>/dev/null || true
+rm -rf "$STATE/$ID.traex-completions"
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
-  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
+  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.traex-hook-token" \
+  "$STATE/$ID.traex-receipt" "$STATE/$ID.traex-session" \
+  "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" \
   "$STATE/.$ID.open-decisions-cursor"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

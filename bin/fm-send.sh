@@ -110,7 +110,7 @@ fm_send_id_from_meta() {  # <meta-file>
   printf '%s' "${base%.meta}"
 }
 
-# fm_send_clear_after_interrupt: muse RESTORES the interrupted prompt back into
+# fm_send_clear_after_interrupt: muse and TraeX RESTORE the interrupted prompt back into
 # the composer when Escape cancels a turn, as real bright text (verified: fg
 # 38;2;204;211;219, luminance ~210, muse 0.1.0-R708.1), not de-emphasised ghost
 # text. Classifying that as pending input is correct - the text really is
@@ -121,10 +121,10 @@ fm_send_id_from_meta() {  # <meta-file>
 fm_send_clear_after_interrupt() {  # <key>
   local key=$1
   [ "$key" = Escape ] || return 0
-  case "$TARGET_HARNESS" in muse*) : ;; *) return 0 ;; esac
+  case "$TARGET_HARNESS" in muse*|traex*) : ;; *) return 0 ;; esac
   [ "$TARGET_BACKEND" != remote ] || return 0
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" C-u "$EXPECTED_LABEL"; then
-    echo "error: Escape reached $T, but the muse composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
+    echo "error: Escape reached $T, but the $TARGET_HARNESS composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
     return 1
   fi
 }
@@ -139,7 +139,7 @@ fm_send_normalize_key() {  # <key>
 fm_send_record_interrupt() {  # <key>
   local key=$1 id gen
   [ "$key" = Escape ] || return 0
-  case "$TARGET_HARNESS" in claude*) : ;; *) return 0 ;; esac
+  case "$TARGET_HARNESS" in claude*|traex*) : ;; *) return 0 ;; esac
   [ -n "$TARGET_META" ] || return 0
   id=$(fm_send_id_from_meta "$TARGET_META")
   [ -f "$STATE/$id.busy-gen" ] || return 0
@@ -151,7 +151,7 @@ fm_send_record_interrupt() {  # <key>
     "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE" "$id" idle \
       --current-gen --source fm-interrupt --event interrupt
   fi || {
-    echo "error: key '$key' reached $T, but the Claude interrupt state could not be recorded for $id" >&2
+    echo "error: key '$key' reached $T, but the $TARGET_HARNESS interrupt state could not be recorded for $id" >&2
     return 1
   }
 }

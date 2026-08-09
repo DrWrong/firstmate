@@ -54,6 +54,10 @@ export PATH
 ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
+ln -s "$SLEEP_BIN" "$LAB/bin/traex"
+ln -s "$SLEEP_BIN" "$LAB/bin/traecli"
+ln -s "$SLEEP_BIN" "$LAB/bin/traex-helper"
+ln -s "$SLEEP_BIN" "$LAB/bin/nottraex"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
@@ -154,6 +158,21 @@ new_window agent "$LAB/bin/claude-link" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+
+# TraeX has two exact live process identities across its launcher surfaces.
+# Both are accepted; substring lookalikes stay ambiguous so a helper or an
+# unrelated binary cannot keep a dead task falsely alive.
+for traex_name in traex traecli; do
+  new_window "$traex_name" "$LAB/bin/$traex_name" 900
+  wait_for_state "$SESSION:$traex_name" alive \
+    || fail "exact TraeX process '$traex_name' must classify alive"
+done
+for traex_decoy in traex-helper nottraex; do
+  new_window "$traex_decoy" "$LAB/bin/$traex_decoy" 900
+  wait_for_state "$SESSION:$traex_decoy" ambiguous \
+    || fail "inexact TraeX lookalike '$traex_decoy' must stay ambiguous"
+done
+pass "tmux liveness: exact traex/traecli identities are alive and substring lookalikes are not"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy

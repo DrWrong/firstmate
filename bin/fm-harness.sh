@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|muse|traex|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -50,6 +50,10 @@ detect_own() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # Firstmate sets this exact command-scoped marker only at the TraeX launch
+  # boundary. Live TraeX 0.200.19 preserved it into tool subprocesses; the
+  # ancestry fallback below covers sessions launched outside Firstmate.
+  [ "${FM_TRAEX_HARNESS:-}" = "traex" ] && { echo traex; return; }
   # muse (Muse Code) publishes no harness-identity marker of its own. The only
   # MUSE_* variable it is documented to hand a child is MUSE_CURRENT_SESSION_LOG,
   # a per-session log PATH rather than an identity, and its export to tool
@@ -58,8 +62,10 @@ detect_own() {
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args
-  for _ in 1 2 3 4 5 6 7 8; do
+  local pid=$$ comm args proof
+  # Match the session-lock owner's 16-hop bound: native hook shells can be
+  # deeper than the legacy eight-hop window, but one walk is enough.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     case "$(basename -- "$comm")" in
       *claude*) echo claude; return ;;
@@ -67,6 +73,7 @@ detect_own() {
       *opencode*) echo opencode; return ;;
       *grok*) echo grok; return ;;
       kimi) echo kimi; return ;;
+      traex|traecli) echo traex; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
       # name carries the version and CHANGES on every auto-update. Match the stable
@@ -91,6 +98,21 @@ detect_own() {
       break
     fi
   done
+  # Default-permission TraeX tools hide their host ancestry and must present the
+  # fresh PreToolUse proof published by the native hook. Keep that exceptional
+  # validation off every ordinary detector path: without the exact proof
+  # artifact there is nothing for the TraeX owner to authenticate.
+  proof="$FM_HOME/state/.traex-primary-ownership-proof"
+  if [ -f "$proof" ] && [ ! -L "$proof" ] \
+      && [ -f "$SCRIPT_DIR/fm-traex-primary-proof-lib.sh" ] \
+      && [ ! -L "$SCRIPT_DIR/fm-traex-primary-proof-lib.sh" ]; then
+    # shellcheck source=bin/fm-traex-primary-proof-lib.sh
+    . "$SCRIPT_DIR/fm-traex-primary-proof-lib.sh"
+    if fm_traex_primary_proof_owner_pid "$FM_HOME/state" >/dev/null 2>&1; then
+      echo traex
+      return
+    fi
+  fi
   echo unknown
 }
 

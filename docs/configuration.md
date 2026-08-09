@@ -206,7 +206,7 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 
 ## Harness support
 
-claude, codex, opencode, pi, pi-signed, grok, and kimi are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.
+claude, codex, opencode, pi, pi-signed, grok, and kimi are empirically verified for crewmate and secondmate launches; feature-gated TraeX is verified only for ordinary workers, scouts, the primary, and local tmux secondmates; [README requirements](../README.md#requirements) own the set supported for the primary session.
 muse is verified for crewmate and scout launches ONLY, and `fm-spawn.sh` refuses it for a secondmate, because muse ships no usable hook surface for a primary session's turn-end supervision; [`docs/verification/muse.md`](verification/muse.md) owns that evidence.
 muse also needs a worker-reachable credential before spawning, and the portable fleet path is the `<config>/muse/auth.json` credential stored by `muse login`, because a caller-only `META_API_KEY` does not cross a long-lived backend daemon.
 New harnesses get verified through a supervised trial task before joining the set.
@@ -215,7 +215,7 @@ Launch mechanics, including the verified command templates, live in [`bin/fm-spa
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
-Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, and OpenCode uses its TUI plugin.
+Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Grok uses background-notify cycles, Codex and TraeX use bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, and OpenCode uses its TUI plugin.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When pi-signed is selected, Firstmate launches the executable named `pi-signed` from `PATH` with `FM_PI_HARNESS=pi-signed` and refuses the launch if it is unavailable rather than falling back to pi.
 Plain Pi launches set `FM_PI_HARNESS=pi`, so a signed primary's environment cannot relabel a plain Pi worker.
@@ -238,6 +238,38 @@ Kimi continues to use the captain's normal Kimi home, including the existing con
 The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
+
+## TraeX adapter
+
+TraeX support is deliberately closed by default and limited to the local tmux backend. It covers ordinary workers and scouts, a TraeX primary running this checkout, and a local tmux secondmate agent. It does not cover TraeX on Herdr, zellij, Orca, or cmux, any remote secondmate route, or any secondmate child placed remotely. Selecting one of those axes fails before an endpoint or remote readiness probe is created; the adapter does not alter any excluded backend's recognition or lifecycle behavior.
+
+The adapter uses TraeX's user-level native hook configuration because the installed TUI does not load an equivalent project hook. Firstmate never writes TraeX's private trust store and never launches with `--dangerously-bypass-hook-trust`. Setup is an explicit operator sequence:
+
+1. Set `TRAECLI_HOME` when the TraeX CLI home is not the default `$HOME/.trae/cli`, then run `bin/fm-traex-hook-install.sh install`.
+2. Open TraeX in a disposable checkout, inspect its native hook-review UI, and approve only the six installed Firstmate command entries. Hook discovery is not trust: a `Hooks need review` notice with no callback proves discovery while correctly leaving the adapter gate closed.
+3. Confirm `GPT-5.6-Luna` remains present in the authenticated `traex models --json` output and run `bin/fm-traex-hook-install.sh probe --model GPT-5.6-Luna`. The probe uses a disposable `/tmp/fm-traex-receipt.*` project, does not bypass hook trust, and writes a receipt only after the real binary delivers `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `Stop`, and `SessionEnd`. `PostCompact` is the sixth managed entry and has separate real-primary evidence because the receipt probe does not compact its short session. A failed lab is preserved for diagnosis.
+4. Create local `config/traex-adapter` and open only the roles intended for this home:
+
+   ```text
+   worker=on
+   primary=on
+   secondmate=on
+   ```
+
+   Every key defaults off. Values are exactly `on` or `off`; duplicate, unknown, or malformed keys fail loudly. `secondmate=on` also requires `primary=on`, because a secondmate is a primary inside its own isolated home.
+5. Before launching this checkout itself under TraeX, run `bin/fm-traex-hook-install.sh bind-primary`; after leaving TraeX permanently, run `bin/fm-traex-hook-install.sh unbind-primary`. Worker and local-secondmate bindings are registered and retired by spawn and teardown.
+
+`bin/fm-traex-lib.sh` is the single code owner of the supported binary identity, receipt schema, role gates, authenticated model lookup, and live-verified model/effort matrix. The current launch matrix is exactly `GPT-5.6-Luna` with an explicit `low`, `medium`, `high`, `xhigh`, or captain-selected `max`; mere presence of another model in the authenticated catalog does not prove its effort behavior. Worker, scout, and local-secondmate launches must supply both axes. A primary-only binding wires an already-running process and therefore verifies the role gate and receipt without claiming authority over that process's launch profile. Preflight checks the exact version and binary hash, login status, stable enabled hooks feature, installed hook and dispatcher hashes, receipt, model, and effort before each Firstmate-owned launch. Each task also keeps a hash-bound receipt snapshot plus the verified binary's device/inode/size/mtime/ctime identity. The semantic-state hot path rehashes the small receipt, hook config, and dispatcher but compares that structural binary identity instead of hashing the roughly 300 MB executable on every watcher fold; replacement or in-place rewrite still changes the verdict to `unknown traex-unverified` rather than trusting an old idle record.
+
+The global dispatcher is inert for every unbound TraeX session. A matching session must present a task-scoped pointer whose token resolves to an owned private record with the exact canonical cwd, task id, busy generation, home, root, uid, and current receipt. Matching lifecycle persistence failures exit 2 with bounded stderr; malformed or foreign unbound input is a silent no-op. The installer merge-preserves non-Firstmate hooks, and `remove` refuses while active bindings exist and removes only exact Firstmate entries and owned files.
+
+`bin/fm-traex-primary-proof-lib.sh` is the single owner of primary ownership proof. `bind-primary` records the exact canonical root/home, reviewed hook/config/binary identities, tmux socket/server/session/pane/PID/TTY, and a live attached non-control client; local-secondmate binding uses its spawn-owned exact pane instead. A native `SessionStart(startup)` establishes lineage and the fleet lock. After `/clear`, TraeX may emit `SessionStart(clear)` eagerly or synchronously with the first new prompt; only that fresh event may establish the new session id. `UserPromptSubmit` verifies the existing session/incarnation/pane/binding/lock without writing any identity, and `PreToolUse` alone publishes the bounded sandbox proof. `Stop`, `SessionEnd`, unbind, owner death, expiry, or any identity drift removes or invalidates that authority. Real `/compact` emits `PreCompact` and `PostCompact`, not `SessionStart(compact)`; the managed `PostCompact` entry performs the context re-emit only after read-only lineage validation. Exact resume keeps the same session id, requires the prior lineage owner and lock owner to be the exited process, then lets the new native `SessionStart(resume)` ancestry converge the lock through `fm-lock.sh` before the first prompt; a live competitor, wrong session, missing lineage, or child-only marker cannot replace it.
+
+TraeX launches use the pinned model's exact `--model` value and `-c 'model_reasoning_effort="<level>"'` for `low`, `medium`, `high`, `xhigh`, or explicit-captain-only `max`. They also carry the exact absolute `HOME`, resolved `TRAE_HOME` (explicit value or `$HOME/.trae`), and authenticated `TRAECLI_HOME` from preflight into the tmux command, so a long-lived tmux server cannot silently select a different auth or trust root. No credential bytes are copied by spawn. Plugins and plugin-provided hooks are disabled at launch so they cannot mutate the reviewed lifecycle surface; native user hooks remain enabled. `/exit` is the verified clean exit. Firstmate interruption sends Escape, clears the prompt TraeX restores with `C-u`, and records the semantic interrupt. Resume is only through `FM_HOME=<owning-home> bin/fm-traex-resume.sh <task-id>`: it reuses the exact recorded local tmux endpoint, native session id, and those same resolved homes, and requires a fresh `SessionStart(source=resume)` confirmation.
+
+`config/traex-adapter` is intentionally absent from the inherited-local-material allowlist. A primary's local secondmate launch reads the primary gate directly; silently propagating the same gate to remote homes would falsely authorize an excluded axis. Configure a secondmate home's own future TraeX workers separately in that home after the same native trust and receipt procedure.
+
+[`verification/traex.md`](verification/traex.md) owns dated binary, trust, lifecycle, TUI, and isolation evidence. [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md) owns the concise operating facts.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -532,6 +564,7 @@ FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
+FM_TRAEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in TraeX primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
