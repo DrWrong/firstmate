@@ -2,7 +2,7 @@
 name: bits-development
 description: >-
   Agent-only procedure for integrating completed code changes into ByteDance BITS.
-  Load before creating, reusing, or updating a BITS Dev Task for code delivery, attaching projects, binding merge requests or Change Cards, or triggering or monitoring BITS PPE, E2E, or self-test pipelines.
+  Load before creating, reusing, or updating a BITS Dev Task for code delivery, attaching projects, binding merge requests or Change Cards, or triggering or monitoring BITS PPE, E2E, self-test, or quick-run pipelines.
   Owns intake, create-versus-reuse, authoritative evidence, multi-project coordination, the read-dry-run-authorize-write-readback discipline, and the BITS safety boundaries; it does not own bytedcli mechanics, merge authority, or the no-mistakes pipeline.
 user-invocable: false
 metadata:
