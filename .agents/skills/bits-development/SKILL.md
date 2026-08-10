@@ -24,7 +24,7 @@ Every mechanical fact lives with its existing owner; this skill only sequences a
 
 - BITS command mechanics, exact flags, dry-run and `--yes` semantics, project types, and control-plane values are owned by the bytedcli BITS skill and current `--help`; consult them at use time and never freeze volatile syntax here.
 - BITS Dev Task creation is owned by the official `bits-devops-dev-task` skill, routed through the bytedcli BITS `references/dev-task.md`; use its `prepare -> confirm -> submit` flow when it is available and installed.
-- Merge, delivery-mode, yolo, and captain-instruction authority are owned by `AGENTS.md` sections 1, 2, and 7 and the captain-instruction precedence rule; this skill adds no authority and relaxes none.
+- Merge, delivery-mode, yolo, and captain-instruction authority are owned by `AGENTS.md` sections 1 and 7 and the captain-instruction precedence rule; this skill adds no authority and relaxes none.
 - Long-poll monitoring without blocking a conversational turn is owned by `process-event-sources` and the `AGENTS.md` section 8 supervision contract.
 - Project identity, registry, and delivery posture are owned by `project-management`.
 - Producing and validating the code change itself, up to a green PR, is owned by the no-mistakes lifecycle in `AGENTS.md` section 7; BITS integration begins only after that work exists.
